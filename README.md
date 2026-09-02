@@ -21,6 +21,21 @@ Initial Sign Brothers baseline:
 
 The initial import is byte-for-byte identical to Tyler's known-good source. Future Sign Brothers maintenance and development should occur in this repository rather than the former maintainer's repository.
 
+### SignAgentSidebarWidth.user.js
+
+Makes the SignAgent Projects / Locations / Sign Types sidebar resizable so long names remain readable.
+
+Behavior:
+- Starts at a 340 px default width when no preference has been saved.
+- Drag the thin handle on the sidebar's right edge to resize it.
+- Remembers the chosen width in browser `localStorage` on that computer.
+- Double-click the resize handle to reset to 340 px.
+- Limits the width to a safe range so the sidebar cannot consume the entire viewport.
+- Reapplies itself when SignAgent dynamically refreshes layout elements.
+- Makes no SignAgent API calls and does not change business data.
+
+Version `1.0.0` was promoted after live testing in SignAgent on September 2, 2026.
+
 ## Environment
 
 - Browser environment: company Windows machines using Chrome
