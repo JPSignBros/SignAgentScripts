@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SignAgent Step Sequence (TEST)
 // @namespace    signbrothers-tools
-// @version      0.1.0
-// @description  Adds explicit stepped sequences such as {209:2} to SignAgent multi-edit text fields.
+// @version      0.2.0
+// @description  Adds explicit stepped sequences such as {209:2} to SignAgent multi-edit text fields using visible Sign List order.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
 // @grant        none
@@ -16,6 +16,9 @@
     const FORM_BOUND_ATTR = 'data-sb-step-sequence-bound';
     const FETCH_HEADER = 'XMLHttpRequest';
     const REQUEST_DELAY_MS = 125;
+    const SELECTED_SIGN_SELECTOR =
+        '#sign_list_container_small a.sign_link.active, ' +
+        '#sign_list_container_small a.sign_link.selected';
 
     let activeJob = false;
     let scanQueued = false;
@@ -45,6 +48,55 @@
             .split(',')
             .map(value => value.trim())
             .filter(Boolean);
+    }
+
+    function getSignIdFromLink(link) {
+        if (!link) return '';
+
+        const datasetId = link.dataset && link.dataset.sign_id;
+        if (datasetId) return String(datasetId);
+
+        const href = link.getAttribute('href') || '';
+        const match = href.match(/\/sign\/(\d+)(?:\/|$)/);
+        return match ? match[1] : '';
+    }
+
+    function resolveVisibleSignListOrder(formIds) {
+        const allowed = new Set(formIds);
+        const seen = new Set();
+        const entries = [];
+
+        document.querySelectorAll(SELECTED_SIGN_SELECTOR).forEach(link => {
+            const id = getSignIdFromLink(link);
+            if (!id || !allowed.has(id) || seen.has(id)) return;
+
+            seen.add(id);
+            entries.push({
+                id,
+                label: link.textContent.trim().replace(/\s+/g, ' ') || `Sign ${id}`
+            });
+        });
+
+        const missing = formIds.filter(id => !seen.has(id));
+
+        if (entries.length !== formIds.length || missing.length) {
+            return {
+                ok: false,
+                entries,
+                missing,
+                message:
+                    `Could not safely determine SignAgent's visible Sign List order ` +
+                    `for all ${formIds.length} selected signs ` +
+                    `(found ${entries.length}). No sequence will be applied.`
+            };
+        }
+
+        return {
+            ok: true,
+            entries,
+            missing: [],
+            message: ''
+        };
     }
 
     function parseStepSyntax(value) {
@@ -107,14 +159,21 @@
         return input.name || input.id || 'Field';
     }
 
-    function makePreview(values) {
-        if (values.length <= 8) return values.join(', ');
+    function makeMappingPreview(entries, values) {
+        const lines = entries.map((entry, index) => `${entry.label}  ->  ${values[index]}`);
+        if (lines.length <= 12) return lines.join('\n');
 
         return [
-            ...values.slice(0, 5),
-            '…',
-            ...values.slice(-2)
-        ].join(', ');
+            ...lines.slice(0, 8),
+            '...',
+            ...lines.slice(-3)
+        ].join('\n');
+    }
+
+    function sameOrder(leftEntries, rightEntries) {
+        if (leftEntries.length !== rightEntries.length) return false;
+
+        return leftEntries.every((entry, index) => entry.id === rightEntries[index].id);
     }
 
     function removeHelper(input) {
@@ -169,7 +228,7 @@
         if (status) status.textContent = text;
     }
 
-    function renderHelper(input, ids) {
+    function renderHelper(input, formIds) {
         const parsed = parseStepSyntax(input.value);
 
         if (!parsed) {
@@ -182,8 +241,6 @@
 
         helper.replaceChildren();
 
-        const fieldLabel = getFieldLabel(input);
-
         if (parsed.error) {
             const error = document.createElement('div');
             error.className = 'sb-step-status';
@@ -193,9 +250,25 @@
             return;
         }
 
+        const order = resolveVisibleSignListOrder(formIds);
+        if (!order.ok) {
+            const error = document.createElement('div');
+            error.className = 'sb-step-status';
+            error.textContent = order.message;
+            helper.appendChild(error);
+            setHelperStatus(helper, order.message, 'error');
+
+            const detail = document.createElement('div');
+            detail.style.marginTop = '4px';
+            detail.style.opacity = '0.8';
+            detail.textContent = 'Safety stop: this test version will not fall back to the scrambled multi-edit form order.';
+            helper.appendChild(detail);
+            return;
+        }
+
         let values;
         try {
-            values = buildSequence(parsed, ids.length);
+            values = buildSequence(parsed, order.entries.length);
         } catch (error) {
             const message = error && error.message ? error.message : String(error);
             const errorNode = document.createElement('div');
@@ -206,14 +279,31 @@
             return;
         }
 
+        const fieldLabel = getFieldLabel(input);
+
         const status = document.createElement('div');
         status.className = 'sb-step-status';
-        status.textContent = `SB sequence for ${ids.length} signs: ${makePreview(values)}`;
+        status.textContent = `SB sequence for ${order.entries.length} signs using visible Sign List order:`;
         helper.appendChild(status);
 
+        const preview = document.createElement('pre');
+        preview.textContent = makeMappingPreview(order.entries, values);
+        Object.assign(preview.style, {
+            margin: '6px 0 0',
+            padding: '6px 8px',
+            maxHeight: '220px',
+            overflow: 'auto',
+            background: 'rgba(255,255,255,0.65)',
+            border: '1px solid rgba(0,0,0,0.08)',
+            borderRadius: '3px',
+            fontSize: '11px',
+            lineHeight: '1.35'
+        });
+        helper.appendChild(preview);
+
         const note = document.createElement('div');
-        note.textContent = `Updates only “${fieldLabel}” using the selected-sign order.`;
-        note.style.marginTop = '3px';
+        note.textContent = `Updates only “${fieldLabel}”. It will refuse to run if the selected-list order changes.`;
+        note.style.marginTop = '5px';
         note.style.opacity = '0.8';
         helper.appendChild(note);
 
@@ -226,9 +316,15 @@
         helper.appendChild(button);
 
         button.addEventListener('click', function () {
-            applySequence(input, ids, parsed, values, helper, button).catch(error => {
-                console.error(LOG_PREFIX, error);
-            });
+            applySequence(
+                input,
+                formIds,
+                order.entries,
+                parsed,
+                values,
+                helper,
+                button
+            ).catch(error => console.error(LOG_PREFIX, error));
         });
     }
 
@@ -334,7 +430,7 @@
         }
     }
 
-    async function applySequence(input, ids, parsed, values, helper, button) {
+    async function applySequence(input, formIds, expectedEntries, parsed, values, helper, button) {
         if (activeJob) return;
 
         const fieldName = input.name;
@@ -345,15 +441,37 @@
             return;
         }
 
+        const freshForm = document.querySelector('#sign_form');
+        const freshFormIds = parseMultiEditIds(freshForm);
+        const freshOrder = resolveVisibleSignListOrder(freshFormIds);
+
+        if (
+            !freshOrder.ok ||
+            freshFormIds.length !== formIds.length ||
+            !sameOrder(expectedEntries, freshOrder.entries)
+        ) {
+            renderHelper(input, freshFormIds);
+            alert(
+                'The selected signs or their Sign List order changed after the preview was created.\n\n' +
+                'No changes were made. Review the refreshed preview and click Apply Sequence again.'
+            );
+            return;
+        }
+
         const first = values[0];
         const last = values[values.length - 1];
         const direction = parsed.step > 0 ? `+${parsed.step}` : String(parsed.step);
+        const firstLabel = expectedEntries[0].label;
+        const lastLabel = expectedEntries[expectedEntries.length - 1].label;
 
         const confirmed = window.confirm(
-            `Apply stepped sequence to ${ids.length} selected signs?\n\n` +
+            `Apply stepped sequence to ${expectedEntries.length} selected signs?\n\n` +
             `Field: ${fieldLabel}\n` +
-            `Sequence: ${first} → ${last} (${direction} each sign)\n\n` +
-            `Only this field will be changed. The signs will be processed in the order SignAgent placed them in this multi-edit selection.`
+            `Sequence: ${first} -> ${last} (${direction} each sign)\n` +
+            `First: ${firstLabel} -> ${first}\n` +
+            `Last: ${lastLabel} -> ${last}\n\n` +
+            `Order source: SignAgent's visible Sign List.\n` +
+            `Only this field will be changed.`
         );
 
         if (!confirmed) return;
@@ -362,31 +480,34 @@
         button.disabled = true;
 
         try {
-            setHelperStatus(helper, `Preflighting ${ids.length} signs…`, 'working');
+            setHelperStatus(helper, `Preflighting ${expectedEntries.length} signs...`, 'working');
 
             const prepared = [];
-            for (let index = 0; index < ids.length; index += 1) {
+            for (let index = 0; index < expectedEntries.length; index += 1) {
+                const entry = expectedEntries[index];
+
                 setHelperStatus(
                     helper,
-                    `Preflighting ${index + 1} of ${ids.length}: ${values[index]}`,
+                    `Preflighting ${index + 1} of ${expectedEntries.length}: ${entry.label} -> ${values[index]}`,
                     'working'
                 );
 
                 prepared.push(
-                    await preflightSign(ids[index], fieldName, values[index])
+                    await preflightSign(entry.id, fieldName, values[index])
                 );
             }
 
-            setHelperStatus(helper, `Preflight passed. Updating ${ids.length} signs…`, 'working');
+            setHelperStatus(helper, `Preflight passed. Updating ${expectedEntries.length} signs...`, 'working');
 
             let completed = 0;
 
             for (let index = 0; index < prepared.length; index += 1) {
                 const item = prepared[index];
+                const entry = expectedEntries[index];
 
                 setHelperStatus(
                     helper,
-                    `Saving ${index + 1} of ${prepared.length}: ${item.nextValue}`,
+                    `Saving ${index + 1} of ${prepared.length}: ${entry.label} -> ${item.nextValue}`,
                     'working'
                 );
 
@@ -402,7 +523,8 @@
                     );
 
                     alert(
-                        `Step Sequence stopped after updating ${completed} of ${prepared.length} signs.\n\n${message}\n\nReload SignAgent and inspect the completed signs before trying again.`
+                        `Step Sequence stopped after updating ${completed} of ${prepared.length} signs.\n\n` +
+                        `${message}\n\nReload SignAgent and inspect the completed signs before trying again.`
                     );
                     return;
                 }
@@ -414,11 +536,18 @@
 
             setHelperStatus(
                 helper,
-                `Done — updated ${completed} signs. Reloading…`,
+                `Done - updated ${completed} signs. Reloading...`,
                 'success'
             );
 
-            log(`Updated ${completed} signs in field ${fieldName}:`, values);
+            log(
+                `Updated ${completed} signs in field ${fieldName} using visible Sign List order:`,
+                expectedEntries.map((entry, index) => ({
+                    id: entry.id,
+                    label: entry.label,
+                    value: values[index]
+                }))
+            );
 
             setTimeout(() => location.reload(), 500);
         } catch (error) {
@@ -439,14 +568,31 @@
             });
     }
 
-    function bindForm(form, ids) {
-        if (form.getAttribute(FORM_BOUND_ATTR) === '1') return;
+    function renderExtendedInputs(form) {
+        const formIds = parseMultiEditIds(form);
+        if (formIds.length <= 1) return;
+
+        form.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
+            .forEach(input => {
+                if (parseStepSyntax(input.value)) {
+                    renderHelper(input, formIds);
+                }
+            });
+    }
+
+    function bindForm(form) {
+        if (form.getAttribute(FORM_BOUND_ATTR) === '1') {
+            renderExtendedInputs(form);
+            return;
+        }
+
         form.setAttribute(FORM_BOUND_ATTR, '1');
 
         function updateInput(input) {
             if (!(input instanceof HTMLInputElement)) return;
             if (input.type !== 'text' || input.disabled || input.readOnly) return;
-            renderHelper(input, ids);
+
+            renderHelper(input, parseMultiEditIds(form));
         }
 
         form.addEventListener('input', event => updateInput(event.target), true);
@@ -460,14 +606,15 @@
 
             alert(
                 'Sign Brothers step syntax detected.\n\n' +
-                'Use the “Apply Sequence” button shown under the field instead of the normal SignAgent Save button. This prevents SignAgent from receiving the custom {start:step} syntax directly.'
+                'Use the “Apply Sequence” button shown under the field instead of the normal SignAgent Save button. ' +
+                'This prevents SignAgent from receiving the custom {start:step} syntax directly.'
             );
         }, true);
 
         form.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
             .forEach(updateInput);
 
-        log(`Multi-edit detected for ${ids.length} signs.`);
+        log(`Multi-edit detected for ${parseMultiEditIds(form).length} signs.`);
     }
 
     function scan() {
@@ -477,7 +624,7 @@
         const ids = parseMultiEditIds(form);
 
         if (form && ids.length > 1) {
-            bindForm(form, ids);
+            bindForm(form);
         }
     }
 
@@ -497,7 +644,7 @@
         });
 
         setInterval(scheduleScan, 1500);
-        log('SignAgent Step Sequence v0.1.0 TEST loaded. Syntax: {start:step}');
+        log('SignAgent Step Sequence v0.2.0 TEST loaded. Syntax: {start:step}');
     }
 
     init();
