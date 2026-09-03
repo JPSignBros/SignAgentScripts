@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SignAgent Step Sequence (TEST)
 // @namespace    signbrothers-tools
-// @version      0.2.0
+// @version      0.2.1
 // @description  Adds explicit stepped sequences such as {209:2} to SignAgent multi-edit text fields using visible Sign List order.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
@@ -172,15 +172,23 @@
 
     function sameOrder(leftEntries, rightEntries) {
         if (leftEntries.length !== rightEntries.length) return false;
-
         return leftEntries.every((entry, index) => entry.id === rightEntries[index].id);
     }
 
-    function removeHelper(input) {
-        const group = input && input.closest('.form-group');
-        if (!group) return;
+    function sameIdSet(leftIds, rightIds) {
+        if (leftIds.length !== rightIds.length) return false;
+        const right = new Set(rightIds);
+        return leftIds.every(id => right.has(id));
+    }
 
-        const helper = group.querySelector(`:scope > .${HELPER_CLASS}`);
+    function getHelper(input) {
+        const group = input && input.closest('.form-group');
+        if (!group) return null;
+        return group.querySelector(`:scope > .${HELPER_CLASS}`);
+    }
+
+    function removeHelper(input) {
+        const helper = getHelper(input);
         if (helper) helper.remove();
     }
 
@@ -188,7 +196,7 @@
         const group = input.closest('.form-group');
         if (!group) return null;
 
-        let helper = group.querySelector(`:scope > .${HELPER_CLASS}`);
+        let helper = getHelper(input);
         if (helper) return helper;
 
         helper = document.createElement('div');
@@ -228,9 +236,22 @@
         if (status) status.textContent = text;
     }
 
-    function renderHelper(input, formIds) {
-        const parsed = parseStepSyntax(input.value);
+    function renderError(helper, signature, message) {
+        if (helper.dataset.sbSignature === signature) return;
+        helper.dataset.sbSignature = signature;
+        helper.replaceChildren();
 
+        const error = document.createElement('div');
+        error.className = 'sb-step-status';
+        error.textContent = message;
+        helper.appendChild(error);
+        setHelperStatus(helper, message, 'error');
+    }
+
+    function renderHelper(input, formIds) {
+        if (activeJob) return;
+
+        const parsed = parseStepSyntax(input.value);
         if (!parsed) {
             removeHelper(input);
             return;
@@ -239,30 +260,18 @@
         const helper = createOrGetHelper(input);
         if (!helper) return;
 
-        helper.replaceChildren();
-
         if (parsed.error) {
-            const error = document.createElement('div');
-            error.className = 'sb-step-status';
-            error.textContent = parsed.error;
-            helper.appendChild(error);
-            setHelperStatus(helper, parsed.error, 'error');
+            renderError(helper, `error|${input.value}|${formIds.join(',')}`, parsed.error);
             return;
         }
 
         const order = resolveVisibleSignListOrder(formIds);
         if (!order.ok) {
-            const error = document.createElement('div');
-            error.className = 'sb-step-status';
-            error.textContent = order.message;
-            helper.appendChild(error);
-            setHelperStatus(helper, order.message, 'error');
-
-            const detail = document.createElement('div');
-            detail.style.marginTop = '4px';
-            detail.style.opacity = '0.8';
-            detail.textContent = 'Safety stop: this test version will not fall back to the scrambled multi-edit form order.';
-            helper.appendChild(detail);
+            renderError(
+                helper,
+                `order-error|${input.value}|${formIds.join(',')}|${order.entries.map(entry => entry.id).join(',')}`,
+                order.message
+            );
             return;
         }
 
@@ -271,15 +280,25 @@
             values = buildSequence(parsed, order.entries.length);
         } catch (error) {
             const message = error && error.message ? error.message : String(error);
-            const errorNode = document.createElement('div');
-            errorNode.className = 'sb-step-status';
-            errorNode.textContent = message;
-            helper.appendChild(errorNode);
-            setHelperStatus(helper, message, 'error');
+            renderError(helper, `sequence-error|${input.value}|${formIds.join(',')}`, message);
             return;
         }
 
+        const signature = [
+            'ready',
+            input.value,
+            formIds.join(','),
+            order.entries.map(entry => entry.id).join(','),
+            values.join(',')
+        ].join('|');
+
+        // Critical: do not rebuild the button unless the real inputs changed.
+        // Rebuilding it continuously can swallow the browser's click event.
+        if (helper.dataset.sbSignature === signature) return;
+        helper.dataset.sbSignature = signature;
+
         const fieldLabel = getFieldLabel(input);
+        helper.replaceChildren();
 
         const status = document.createElement('div');
         status.className = 'sb-step-status';
@@ -315,16 +334,31 @@
         button.disabled = activeJob;
         helper.appendChild(button);
 
-        button.addEventListener('click', function () {
-            applySequence(
+        const expectedEntries = order.entries.map(entry => ({ ...entry }));
+        const expectedValues = [...values];
+        const expectedFormIds = [...formIds];
+
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            log('Apply Sequence clicked.', {
+                entries: expectedEntries,
+                values: expectedValues
+            });
+
+            void applySequence(
                 input,
-                formIds,
-                order.entries,
+                expectedFormIds,
+                expectedEntries,
                 parsed,
-                values,
+                expectedValues,
                 helper,
                 button
-            ).catch(error => console.error(LOG_PREFIX, error));
+            ).catch(error => {
+                console.error(LOG_PREFIX, error);
+                alert(`Step Sequence encountered an unexpected error.\n\n${error && error.message ? error.message : String(error)}`);
+            });
         });
     }
 
@@ -425,7 +459,9 @@
 
             if (validationError) {
                 const message = validationError.textContent.trim().replace(/\s+/g, ' ');
-                throw new Error(`Sign ${prepared.signId} was rejected by SignAgent${message ? `: ${message}` : '.'}`);
+                throw new Error(
+                    `Sign ${prepared.signId} was rejected by SignAgent${message ? `: ${message}` : '.'}`
+                );
             }
         }
     }
@@ -447,7 +483,7 @@
 
         if (
             !freshOrder.ok ||
-            freshFormIds.length !== formIds.length ||
+            !sameIdSet(formIds, freshFormIds) ||
             !sameOrder(expectedEntries, freshOrder.entries)
         ) {
             renderHelper(input, freshFormIds);
@@ -569,6 +605,8 @@
     }
 
     function renderExtendedInputs(form) {
+        if (activeJob) return;
+
         const formIds = parseMultiEditIds(form);
         if (formIds.length <= 1) return;
 
@@ -644,7 +682,7 @@
         });
 
         setInterval(scheduleScan, 1500);
-        log('SignAgent Step Sequence v0.2.0 TEST loaded. Syntax: {start:step}');
+        log('SignAgent Step Sequence v0.2.1 TEST loaded. Syntax: {start:step}');
     }
 
     init();
