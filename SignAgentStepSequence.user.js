@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SignAgent Step Sequence (TEST)
 // @namespace    signbrothers-tools
-// @version      0.2.2
-// @description  Adds stepped sequences such as {209:2} to SignAgent multi-edit text fields using visible Sign List order.
+// @version      0.3.0
+// @description  Adds fast {start:step} sequencing plus an editable {seq} mapping tool to SignAgent multi-edit text fields.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
 // @grant        none
@@ -11,11 +11,11 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.2.2';
-    const LOG_PREFIX = '[SB Step Sequence]';
-    const HELPER_CLASS = 'sb-step-sequence-helper';
-    const APPLY_BUTTON_CLASS = 'sb-step-sequence-apply';
-    const FORM_BOUND_ATTR = 'data-sb-step-sequence-bound';
+    const VERSION = '0.3.0';
+    const LOG_PREFIX = '[SB Sequence Tool]';
+    const HELPER_CLASS = 'sb-sequence-helper';
+    const ACTION_BUTTON_CLASS = 'sb-sequence-action';
+    const FORM_BOUND_ATTR = 'data-sb-sequence-bound';
     const FETCH_HEADER = 'XMLHttpRequest';
     const REQUEST_DELAY_MS = 125;
     const SELECTED_SIGN_SELECTOR =
@@ -121,6 +121,14 @@
         };
     }
 
+    function isSeqSyntax(value) {
+        return /^\{\s*seq\s*\}$/i.test(String(value || '').trim());
+    }
+
+    function hasSequenceSyntax(input) {
+        return Boolean(parseStepSyntax(input.value) || isSeqSyntax(input.value));
+    }
+
     function formatSequenceValue(value, width) {
         if (!width) return String(value);
 
@@ -143,6 +151,30 @@
         }
 
         return values;
+    }
+
+    function parseGenerator(startText, stepText) {
+        const cleanStart = String(startText || '').trim();
+        const cleanStep = String(stepText || '').trim();
+        const start = Number(cleanStart);
+        const step = Number(cleanStep);
+
+        if (!/^-?\d+$/.test(cleanStart) || !Number.isSafeInteger(start)) {
+            throw new Error('Starting number must be a whole number.');
+        }
+
+        if (!/^-?\d+$/.test(cleanStep) || !Number.isSafeInteger(step) || step === 0) {
+            throw new Error('Step must be a whole number and cannot be 0.');
+        }
+
+        const unsignedStart = cleanStart.replace(/^-/, '');
+        const preserveWidth = unsignedStart.length > 1 && unsignedStart.startsWith('0');
+
+        return {
+            start,
+            step,
+            width: preserveWidth ? unsignedStart.length : 0
+        };
     }
 
     function getFieldLabel(input) {
@@ -201,7 +233,7 @@
 
         Object.assign(helper.style, {
             marginTop: '7px',
-            padding: '8px 10px',
+            padding: '9px 10px',
             border: '1px solid #b8c7d9',
             borderRadius: '4px',
             background: '#f4f8fc',
@@ -214,7 +246,7 @@
         return helper;
     }
 
-    function setHelperStatus(helper, text, tone = 'normal') {
+    function setHelperFeedback(helper, text, tone = 'normal') {
         if (!helper) return;
 
         const colors = {
@@ -229,8 +261,8 @@
         helper.style.color = color;
         helper.style.borderColor = borderColor;
 
-        const status = helper.querySelector('.sb-step-status');
-        if (status) status.textContent = text;
+        const feedback = helper.querySelector('.sb-sequence-feedback');
+        if (feedback) feedback.textContent = text || '';
     }
 
     function renderError(helper, signature, message) {
@@ -239,27 +271,30 @@
         helper.dataset.sbSignature = signature;
         helper.replaceChildren();
 
-        const error = document.createElement('div');
-        error.className = 'sb-step-status';
-        error.textContent = message;
-        helper.appendChild(error);
-        setHelperStatus(helper, message, 'error');
+        const feedback = document.createElement('div');
+        feedback.className = 'sb-sequence-feedback';
+        feedback.textContent = message;
+        helper.appendChild(feedback);
+        setHelperFeedback(helper, message, 'error');
     }
 
-    function renderHelper(input, formIds) {
-        if (activeJob) return;
+    function makeActionButton(label, action, primary = true) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className =
+            `${primary ? 'btn btn-xs btn-primary' : 'btn btn-xs btn-default'} ${ACTION_BUTTON_CLASS}`;
+        button.dataset.sbAction = action;
+        button.textContent = label;
+        button.disabled = activeJob;
+        return button;
+    }
 
-        const parsed = parseStepSyntax(input.value);
-        if (!parsed) {
-            removeHelper(input);
-            return;
-        }
-
+    function renderStepHelper(input, formIds, parsed) {
         const helper = createOrGetHelper(input);
         if (!helper) return;
 
         if (parsed.error) {
-            renderError(helper, `error|${input.value}|${formIds.join(',')}`, parsed.error);
+            renderError(helper, `step-error|${input.value}|${formIds.join(',')}`, parsed.error);
             return;
         }
 
@@ -267,7 +302,7 @@
         if (!order.ok) {
             renderError(
                 helper,
-                `order-error|${input.value}|${formIds.join(',')}|${order.entries.map(entry => entry.id).join(',')}`,
+                `step-order-error|${input.value}|${formIds.join(',')}|${order.entries.map(entry => entry.id).join(',')}`,
                 order.message
             );
             return;
@@ -278,12 +313,12 @@
             values = buildSequence(parsed, order.entries.length);
         } catch (error) {
             const message = error && error.message ? error.message : String(error);
-            renderError(helper, `sequence-error|${input.value}|${formIds.join(',')}`, message);
+            renderError(helper, `step-sequence-error|${input.value}|${formIds.join(',')}`, message);
             return;
         }
 
         const signature = [
-            'ready',
+            'step-ready',
             input.value,
             formIds.join(','),
             order.entries.map(entry => entry.id).join(','),
@@ -296,11 +331,11 @@
 
         const fieldLabel = getFieldLabel(input);
 
-        const status = document.createElement('div');
-        status.className = 'sb-step-status';
-        status.textContent =
-            `SB sequence TEST v${VERSION} for ${order.entries.length} signs using visible Sign List order:`;
-        helper.appendChild(status);
+        const title = document.createElement('div');
+        title.style.fontWeight = '600';
+        title.textContent =
+            `SB step sequence TEST v${VERSION} for ${order.entries.length} signs using visible Sign List order:`;
+        helper.appendChild(title);
 
         const preview = document.createElement('pre');
         preview.textContent = makeMappingPreview(order.entries, values);
@@ -319,35 +354,190 @@
 
         const note = document.createElement('div');
         note.textContent =
-            `Updates only “${fieldLabel}”. It will refuse to run if the selected-list order changes.`;
+            `Updates only "${fieldLabel}". It will refuse to run if the selected-list order changes.`;
         note.style.marginTop = '5px';
         note.style.opacity = '0.8';
         helper.appendChild(note);
 
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = `btn btn-xs btn-primary ${APPLY_BUTTON_CLASS}`;
-        button.textContent = 'Apply Sequence';
+        const button = makeActionButton('Apply Sequence', 'apply-step', true);
         button.style.marginTop = '7px';
-        button.disabled = activeJob;
         helper.appendChild(button);
+
+        const feedback = document.createElement('div');
+        feedback.className = 'sb-sequence-feedback';
+        feedback.style.marginTop = '5px';
+        helper.appendChild(feedback);
     }
 
-    function getApplyContext(button) {
+    function renderSeqHelper(input, formIds) {
+        const helper = createOrGetHelper(input);
+        if (!helper) return;
+
+        const order = resolveVisibleSignListOrder(formIds);
+        if (!order.ok) {
+            renderError(
+                helper,
+                `seq-order-error|${formIds.join(',')}|${order.entries.map(entry => entry.id).join(',')}`,
+                order.message
+            );
+            return;
+        }
+
+        const signature = [
+            'seq-ready',
+            formIds.join(','),
+            order.entries.map(entry => entry.id).join(',')
+        ].join('|');
+
+        if (helper.dataset.sbSignature === signature) return;
+        helper.dataset.sbSignature = signature;
+        helper.replaceChildren();
+
+        const fieldLabel = getFieldLabel(input);
+
+        const title = document.createElement('div');
+        title.style.fontWeight = '600';
+        title.textContent =
+            `SB sequence editor TEST v${VERSION} - ${order.entries.length} signs in visible Sign List order`;
+        helper.appendChild(title);
+
+        const intro = document.createElement('div');
+        intro.style.marginTop = '4px';
+        intro.textContent =
+            'Generate a starting suggestion, then edit any row that needs a jump, skip, reversal, letter, or other exception.';
+        helper.appendChild(intro);
+
+        const generator = document.createElement('div');
+        Object.assign(generator.style, {
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '6px',
+            alignItems: 'flex-end',
+            marginTop: '8px'
+        });
+
+        const startWrap = document.createElement('label');
+        startWrap.style.margin = '0';
+        startWrap.textContent = 'Start';
+
+        const startInput = document.createElement('input');
+        startInput.type = 'text';
+        startInput.className = 'form-control input-sm sb-seq-start';
+        startInput.placeholder = '507';
+        Object.assign(startInput.style, {
+            width: '90px',
+            marginTop: '2px'
+        });
+        startWrap.appendChild(startInput);
+        generator.appendChild(startWrap);
+
+        const stepWrap = document.createElement('label');
+        stepWrap.style.margin = '0';
+        stepWrap.textContent = 'Step';
+
+        const stepInput = document.createElement('input');
+        stepInput.type = 'text';
+        stepInput.className = 'form-control input-sm sb-seq-step';
+        stepInput.value = '1';
+        Object.assign(stepInput.style, {
+            width: '70px',
+            marginTop: '2px'
+        });
+        stepWrap.appendChild(stepInput);
+        generator.appendChild(stepWrap);
+
+        const fillButton = makeActionButton('Fill Suggestions', 'seq-fill', false);
+        fillButton.style.marginBottom = '1px';
+        generator.appendChild(fillButton);
+
+        helper.appendChild(generator);
+
+        const list = document.createElement('div');
+        Object.assign(list.style, {
+            marginTop: '8px',
+            maxHeight: '330px',
+            overflowY: 'auto',
+            border: '1px solid rgba(0,0,0,0.10)',
+            borderRadius: '3px',
+            background: 'rgba(255,255,255,0.65)'
+        });
+
+        order.entries.forEach((entry, index) => {
+            const row = document.createElement('div');
+            Object.assign(row.style, {
+                display: 'grid',
+                gridTemplateColumns: 'minmax(90px, 1fr) minmax(110px, 1fr)',
+                gap: '8px',
+                alignItems: 'center',
+                padding: '5px 7px',
+                borderTop: index === 0 ? '0' : '1px solid rgba(0,0,0,0.06)'
+            });
+
+            const label = document.createElement('div');
+            label.textContent = entry.label;
+            label.title = `SignAgent ID ${entry.id}`;
+            row.appendChild(label);
+
+            const valueInput = document.createElement('input');
+            valueInput.type = 'text';
+            valueInput.className = 'form-control input-sm sb-seq-value';
+            valueInput.dataset.signId = entry.id;
+            valueInput.dataset.signLabel = entry.label;
+            valueInput.setAttribute('aria-label', `${entry.label} value`);
+            row.appendChild(valueInput);
+
+            list.appendChild(row);
+        });
+
+        helper.appendChild(list);
+
+        const note = document.createElement('div');
+        note.style.marginTop = '6px';
+        note.style.opacity = '0.8';
+        note.textContent =
+            `Every row is editable. All rows need a value before applying. Only "${fieldLabel}" will be changed.`;
+        helper.appendChild(note);
+
+        const applyButton = makeActionButton('Apply Mapped Values', 'apply-seq', true);
+        applyButton.style.marginTop = '7px';
+        helper.appendChild(applyButton);
+
+        const feedback = document.createElement('div');
+        feedback.className = 'sb-sequence-feedback';
+        feedback.style.marginTop = '5px';
+        feedback.textContent = 'Enter a Start value and click Fill Suggestions, then edit any exceptions.';
+        helper.appendChild(feedback);
+    }
+
+    function renderHelper(input, formIds) {
+        if (activeJob) return;
+
+        const parsedStep = parseStepSyntax(input.value);
+        if (parsedStep) {
+            renderStepHelper(input, formIds, parsedStep);
+            return;
+        }
+
+        if (isSeqSyntax(input.value)) {
+            renderSeqHelper(input, formIds);
+            return;
+        }
+
+        removeHelper(input);
+    }
+
+    function getSourceContext(button) {
         const helper = button.closest(`.${HELPER_CLASS}`);
         const group = helper && helper.closest('.form-group');
-        const input = group && group.querySelector(
-            'input[type="text"]:not([disabled]):not([readonly])'
-        );
+
+        const input = group && Array.from(
+            group.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
+        ).find(candidate => !helper.contains(candidate));
+
         const form = input && input.closest('#sign_form');
 
         if (!helper || !input || !form) {
-            throw new Error('Could not reconnect the Apply button to its SignAgent field/form.');
-        }
-
-        const parsed = parseStepSyntax(input.value);
-        if (!parsed || parsed.error) {
-            throw new Error(parsed && parsed.error ? parsed.error : 'The sequence syntax is no longer valid.');
+            throw new Error('Could not reconnect this tool to its SignAgent field/form.');
         }
 
         const formIds = parseMultiEditIds(form);
@@ -360,97 +550,161 @@
             throw new Error(order.message);
         }
 
-        const values = buildSequence(parsed, order.entries.length);
-
         return {
             helper,
             input,
+            form,
             formIds,
-            parsed,
             entries: order.entries.map(entry => ({ ...entry })),
-            values,
             button
         };
     }
 
-    function handleApplyPointerDown(event) {
-        if (event.button !== undefined && event.button !== 0) return;
-        if (!(event.target instanceof Element)) return;
+    function getStepApplyContext(button) {
+        const base = getSourceContext(button);
+        const parsed = parseStepSyntax(base.input.value);
 
-        const button = event.target.closest(`.${APPLY_BUTTON_CLASS}`);
-        if (!button || button.disabled || activeJob) return;
-
-        // Use capture-phase pointerdown instead of a listener attached to the
-        // individual button. SignAgent can replace/re-render DOM between
-        // pointerdown and click; catching pointerdown here avoids that race.
-        event.preventDefault();
-        event.stopImmediatePropagation();
-
-        let context;
-        try {
-            context = getApplyContext(button);
-        } catch (error) {
-            const message = error && error.message ? error.message : String(error);
-            alert(`Step Sequence could not start. No changes were made.\n\n${message}`);
-            return;
+        if (!parsed || parsed.error) {
+            throw new Error(parsed && parsed.error ? parsed.error : 'The step syntax is no longer valid.');
         }
 
-        log('Apply activation captured at document level.', {
-            entries: context.entries,
-            values: context.values
-        });
+        return {
+            ...base,
+            mode: 'step',
+            parsed,
+            values: buildSequence(parsed, base.entries.length)
+        };
+    }
 
-        void applySequence(
-            context.input,
-            context.formIds,
-            context.entries,
-            context.parsed,
-            context.values,
-            context.helper,
-            context.button
-        ).catch(error => {
-            console.error(LOG_PREFIX, error);
-            alert(
-                `Step Sequence encountered an unexpected error.\n\n` +
-                `${error && error.message ? error.message : String(error)}`
-            );
+    function getSeqApplyContext(button) {
+        const base = getSourceContext(button);
+
+        if (!isSeqSyntax(base.input.value)) {
+            throw new Error('The field is no longer in {seq} mode.');
+        }
+
+        const mappingInputs = Array.from(base.helper.querySelectorAll('.sb-seq-value'));
+
+        if (mappingInputs.length !== base.entries.length) {
+            throw new Error('The mapping editor no longer matches the selected sign count.');
+        }
+
+        const values = [];
+
+        for (let index = 0; index < base.entries.length; index += 1) {
+            const entry = base.entries[index];
+            const mappingInput = mappingInputs[index];
+
+            if (mappingInput.dataset.signId !== entry.id) {
+                throw new Error('The mapping editor order no longer matches the Sign List order.');
+            }
+
+            const value = mappingInput.value.trim();
+            if (!value) {
+                throw new Error(`${entry.label} does not have a value yet.`);
+            }
+
+            values.push(value);
+        }
+
+        return {
+            ...base,
+            mode: 'seq',
+            values
+        };
+    }
+
+    function fillSeqSuggestions(button) {
+        const base = getSourceContext(button);
+
+        if (!isSeqSyntax(base.input.value)) {
+            throw new Error('The field is no longer in {seq} mode.');
+        }
+
+        const startInput = base.helper.querySelector('.sb-seq-start');
+        const stepInput = base.helper.querySelector('.sb-seq-step');
+        const mappingInputs = Array.from(base.helper.querySelectorAll('.sb-seq-value'));
+
+        if (!startInput || !stepInput || mappingInputs.length !== base.entries.length) {
+            throw new Error('The sequence editor controls are incomplete.');
+        }
+
+        const generator = parseGenerator(startInput.value, stepInput.value);
+        const values = buildSequence(generator, base.entries.length);
+
+        for (let index = 0; index < mappingInputs.length; index += 1) {
+            if (mappingInputs[index].dataset.signId !== base.entries[index].id) {
+                throw new Error('The mapping editor order no longer matches the Sign List order.');
+            }
+            mappingInputs[index].value = values[index];
+        }
+
+        setHelperFeedback(
+            base.helper,
+            `Filled ${values.length} suggestions. Edit any exceptions, then review all rows before applying.`,
+            'normal'
+        );
+
+        log('Filled editable sequence suggestions.', {
+            entries: base.entries,
+            values
         });
     }
 
-    function handleApplyKeyDown(event) {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
+    function handleActionPointerDown(event) {
+        if (event.button !== undefined && event.button !== 0) return;
         if (!(event.target instanceof Element)) return;
 
-        const button = event.target.closest(`.${APPLY_BUTTON_CLASS}`);
+        const button = event.target.closest(`.${ACTION_BUTTON_CLASS}`);
         if (!button || button.disabled || activeJob) return;
 
         event.preventDefault();
         event.stopImmediatePropagation();
+        activateAction(button);
+    }
 
-        let context;
+    function handleActionKeyDown(event) {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        if (!(event.target instanceof Element)) return;
+
+        const button = event.target.closest(`.${ACTION_BUTTON_CLASS}`);
+        if (!button || button.disabled || activeJob) return;
+
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        activateAction(button);
+    }
+
+    function activateAction(button) {
+        const action = button.dataset.sbAction;
+
         try {
-            context = getApplyContext(button);
+            if (action === 'seq-fill') {
+                fillSeqSuggestions(button);
+                return;
+            }
+
+            if (action === 'apply-step') {
+                void applyMappings(getStepApplyContext(button)).catch(handleUnexpectedError);
+                return;
+            }
+
+            if (action === 'apply-seq') {
+                void applyMappings(getSeqApplyContext(button)).catch(handleUnexpectedError);
+                return;
+            }
         } catch (error) {
             const message = error && error.message ? error.message : String(error);
-            alert(`Step Sequence could not start. No changes were made.\n\n${message}`);
-            return;
+            alert(`Sequence Tool could not continue. No changes were made.\n\n${message}`);
         }
+    }
 
-        void applySequence(
-            context.input,
-            context.formIds,
-            context.entries,
-            context.parsed,
-            context.values,
-            context.helper,
-            context.button
-        ).catch(error => {
-            console.error(LOG_PREFIX, error);
-            alert(
-                `Step Sequence encountered an unexpected error.\n\n` +
-                `${error && error.message ? error.message : String(error)}`
-            );
-        });
+    function handleUnexpectedError(error) {
+        console.error(LOG_PREFIX, error);
+        alert(
+            `Sequence Tool encountered an unexpected error.\n\n` +
+            `${error && error.message ? error.message : String(error)}`
+        );
     }
 
     async function fetchText(url, useAjaxHeader) {
@@ -497,7 +751,7 @@
         const field = form.elements.namedItem(fieldName);
 
         if (!field || field instanceof RadioNodeList) {
-            throw new Error(`Field “${fieldName}” was not found on sign ${signId}.`);
+            throw new Error(`Field "${fieldName}" was not found on sign ${signId}.`);
         }
 
         const formData = new FormData(form);
@@ -558,80 +812,105 @@
         }
     }
 
-    async function applySequence(input, formIds, expectedEntries, parsed, values, helper, button) {
-        if (activeJob) return;
-
-        const fieldName = input.name;
-        const fieldLabel = getFieldLabel(input);
-
-        if (!fieldName) {
-            alert('Sign Brothers Step Sequence could not identify this field.');
-            return;
-        }
-
+    function verifyFreshSelection(context) {
         const freshForm = document.querySelector('#sign_form');
         const freshFormIds = parseMultiEditIds(freshForm);
         const freshOrder = resolveVisibleSignListOrder(freshFormIds);
 
         if (
             !freshOrder.ok ||
-            !sameIdSet(formIds, freshFormIds) ||
-            !sameOrder(expectedEntries, freshOrder.entries)
+            !sameIdSet(context.formIds, freshFormIds) ||
+            !sameOrder(context.entries, freshOrder.entries)
         ) {
-            renderHelper(input, freshFormIds);
-            alert(
-                'The selected signs or their Sign List order changed after the preview was created.\n\n' +
-                'No changes were made. Review the refreshed preview and try again.'
+            throw new Error(
+                'The selected signs or their Sign List order changed after the preview/editor was created.'
             );
-            return;
+        }
+    }
+
+    function confirmMappings(context) {
+        const fieldLabel = getFieldLabel(context.input);
+        const first = context.values[0];
+        const last = context.values[context.values.length - 1];
+        const firstLabel = context.entries[0].label;
+        const lastLabel = context.entries[context.entries.length - 1].label;
+
+        if (context.mode === 'step') {
+            const direction = context.parsed.step > 0 ? `+${context.parsed.step}` : String(context.parsed.step);
+
+            return window.confirm(
+                `Apply stepped sequence to ${context.entries.length} selected signs?\n\n` +
+                `Field: ${fieldLabel}\n` +
+                `Sequence: ${first} -> ${last} (${direction} each sign)\n` +
+                `First: ${firstLabel} -> ${first}\n` +
+                `Last: ${lastLabel} -> ${last}\n\n` +
+                `Order source: SignAgent's visible Sign List.\n` +
+                `Only this field will be changed.`
+            );
         }
 
-        const first = values[0];
-        const last = values[values.length - 1];
-        const direction = parsed.step > 0 ? `+${parsed.step}` : String(parsed.step);
-        const firstLabel = expectedEntries[0].label;
-        const lastLabel = expectedEntries[expectedEntries.length - 1].label;
-
-        const confirmed = window.confirm(
-            `Apply stepped sequence to ${expectedEntries.length} selected signs?\n\n` +
+        return window.confirm(
+            `Apply ${context.entries.length} mapped values?\n\n` +
             `Field: ${fieldLabel}\n` +
-            `Sequence: ${first} -> ${last} (${direction} each sign)\n` +
             `First: ${firstLabel} -> ${first}\n` +
             `Last: ${lastLabel} -> ${last}\n\n` +
+            `You are applying the editable mapping shown in the {seq} editor.\n` +
             `Order source: SignAgent's visible Sign List.\n` +
             `Only this field will be changed.`
         );
+    }
 
-        if (!confirmed) return;
+    async function applyMappings(context) {
+        if (activeJob) return;
 
-        activeJob = true;
-        button.disabled = true;
-        const originalButtonText = button.textContent;
-        button.textContent = 'Working...';
+        const fieldName = context.input.name;
+        if (!fieldName) {
+            alert('Sequence Tool could not identify this field.');
+            return;
+        }
 
         try {
-            setHelperStatus(helper, `Preflighting ${expectedEntries.length} signs...`, 'working');
+            verifyFreshSelection(context);
+        } catch (error) {
+            const message = error && error.message ? error.message : String(error);
+            alert(`${message}\n\nNo changes were made. Review the current selection and try again.`);
+            return;
+        }
+
+        if (!confirmMappings(context)) return;
+
+        activeJob = true;
+        context.button.disabled = true;
+        const originalButtonText = context.button.textContent;
+        context.button.textContent = 'Working...';
+
+        try {
+            setHelperFeedback(
+                context.helper,
+                `Preflighting ${context.entries.length} signs...`,
+                'working'
+            );
 
             const prepared = [];
 
-            for (let index = 0; index < expectedEntries.length; index += 1) {
-                const entry = expectedEntries[index];
+            for (let index = 0; index < context.entries.length; index += 1) {
+                const entry = context.entries[index];
 
-                setHelperStatus(
-                    helper,
-                    `Preflighting ${index + 1} of ${expectedEntries.length}: ` +
-                    `${entry.label} -> ${values[index]}`,
+                setHelperFeedback(
+                    context.helper,
+                    `Preflighting ${index + 1} of ${context.entries.length}: ` +
+                    `${entry.label} -> ${context.values[index]}`,
                     'working'
                 );
 
                 prepared.push(
-                    await preflightSign(entry.id, fieldName, values[index])
+                    await preflightSign(entry.id, fieldName, context.values[index])
                 );
             }
 
-            setHelperStatus(
-                helper,
-                `Preflight passed. Updating ${expectedEntries.length} signs...`,
+            setHelperFeedback(
+                context.helper,
+                `Preflight passed. Updating ${context.entries.length} signs...`,
                 'working'
             );
 
@@ -639,10 +918,10 @@
 
             for (let index = 0; index < prepared.length; index += 1) {
                 const item = prepared[index];
-                const entry = expectedEntries[index];
+                const entry = context.entries[index];
 
-                setHelperStatus(
-                    helper,
+                setHelperFeedback(
+                    context.helper,
                     `Saving ${index + 1} of ${prepared.length}: ${entry.label} -> ${item.nextValue}`,
                     'working'
                 );
@@ -652,14 +931,15 @@
                     completed += 1;
                 } catch (error) {
                     const message = error && error.message ? error.message : String(error);
-                    setHelperStatus(
-                        helper,
+
+                    setHelperFeedback(
+                        context.helper,
                         `Stopped after ${completed} of ${prepared.length}. ${message}`,
                         'error'
                     );
 
                     alert(
-                        `Step Sequence stopped after updating ${completed} of ${prepared.length} signs.\n\n` +
+                        `Sequence Tool stopped after updating ${completed} of ${prepared.length} signs.\n\n` +
                         `${message}\n\nReload SignAgent and inspect the completed signs before trying again.`
                     );
                     return;
@@ -670,40 +950,37 @@
                 }
             }
 
-            setHelperStatus(
-                helper,
+            setHelperFeedback(
+                context.helper,
                 `Done - updated ${completed} signs. Reloading...`,
                 'success'
             );
 
             log(
                 `Updated ${completed} signs in field ${fieldName} using visible Sign List order:`,
-                expectedEntries.map((entry, index) => ({
+                context.entries.map((entry, index) => ({
                     id: entry.id,
                     label: entry.label,
-                    value: values[index]
+                    value: context.values[index]
                 }))
             );
 
             setTimeout(() => location.reload(), 500);
         } catch (error) {
             const message = error && error.message ? error.message : String(error);
-            setHelperStatus(helper, `No changes made. ${message}`, 'error');
-            alert(`Step Sequence did not start. No changes were made.\n\n${message}`);
+            setHelperFeedback(context.helper, `No changes made. ${message}`, 'error');
+            alert(`Sequence Tool did not start. No changes were made.\n\n${message}`);
         } finally {
             activeJob = false;
-            button.disabled = false;
-            button.textContent = originalButtonText;
+            context.button.disabled = false;
+            context.button.textContent = originalButtonText;
         }
     }
 
     function hasExtendedSyntax(form) {
         return Array.from(
             form.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
-        ).some(input => {
-            const parsed = parseStepSyntax(input.value);
-            return parsed && !parsed.error;
-        });
+        ).some(input => !input.closest(`.${HELPER_CLASS}`) && hasSequenceSyntax(input));
     }
 
     function renderExtendedInputs(form) {
@@ -714,7 +991,8 @@
 
         form.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
             .forEach(input => {
-                if (parseStepSyntax(input.value)) {
+                if (input.closest(`.${HELPER_CLASS}`)) return;
+                if (hasSequenceSyntax(input)) {
                     renderHelper(input, formIds);
                 }
             });
@@ -731,6 +1009,7 @@
         function updateInput(input) {
             if (!(input instanceof HTMLInputElement)) return;
             if (input.type !== 'text' || input.disabled || input.readOnly) return;
+            if (input.closest(`.${HELPER_CLASS}`)) return;
 
             renderHelper(input, parseMultiEditIds(form));
         }
@@ -745,9 +1024,9 @@
             event.stopImmediatePropagation();
 
             alert(
-                'Sign Brothers step syntax detected.\n\n' +
-                'Use the “Apply Sequence” button shown under the field instead of the normal SignAgent Save button. ' +
-                'This prevents SignAgent from receiving the custom {start:step} syntax directly.'
+                'Sign Brothers sequence syntax detected.\n\n' +
+                'Use the Sign Brothers Apply button shown under the field instead of the normal SignAgent Save button. ' +
+                'This prevents SignAgent from receiving {start:step} or {seq} directly.'
             );
         }, true);
 
@@ -775,10 +1054,8 @@
     }
 
     function init() {
-        // Capture activation at the document level so the Apply action survives
-        // SignAgent re-renders/replacements of our helper DOM.
-        document.addEventListener('pointerdown', handleApplyPointerDown, true);
-        document.addEventListener('keydown', handleApplyKeyDown, true);
+        document.addEventListener('pointerdown', handleActionPointerDown, true);
+        document.addEventListener('keydown', handleActionKeyDown, true);
 
         scheduleScan();
 
@@ -789,7 +1066,10 @@
         });
 
         setInterval(scheduleScan, 1500);
-        log(`SignAgent Step Sequence v${VERSION} TEST loaded. Syntax: {start:step}`);
+        log(
+            `SignAgent Sequence Tool v${VERSION} TEST loaded. ` +
+            'Syntax: {start:step} for fast sequences or {seq} for editable mappings.'
+        );
     }
 
     init();
