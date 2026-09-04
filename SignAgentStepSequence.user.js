@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SignAgent Step Sequence (TEST)
 // @namespace    signbrothers-tools
-// @version      0.3.0
-// @description  Adds fast {start:step} sequencing plus an editable {seq} mapping tool to SignAgent multi-edit text fields.
+// @version      0.3.1
+// @description  Adds fast {start:step} sequencing plus an editable {seq} mapping tool to SignAgent writable text fields.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
 // @grant        none
@@ -11,13 +11,16 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.3.0';
+    const VERSION = '0.3.1';
     const LOG_PREFIX = '[SB Sequence Tool]';
     const HELPER_CLASS = 'sb-sequence-helper';
     const ACTION_BUTTON_CLASS = 'sb-sequence-action';
     const FORM_BOUND_ATTR = 'data-sb-sequence-bound';
     const FETCH_HEADER = 'XMLHttpRequest';
     const REQUEST_DELAY_MS = 125;
+    const WRITABLE_TEXT_SELECTOR =
+        'input[type="text"]:not([disabled]):not([readonly]), ' +
+        'textarea:not([disabled]):not([readonly])';
     const SELECTED_SIGN_SELECTOR =
         '#sign_list_container_small a.sign_link.active, ' +
         '#sign_list_container_small a.sign_link.selected';
@@ -531,7 +534,7 @@
         const group = helper && helper.closest('.form-group');
 
         const input = group && Array.from(
-            group.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
+            group.querySelectorAll(WRITABLE_TEXT_SELECTOR)
         ).find(candidate => !helper.contains(candidate));
 
         const form = input && input.closest('#sign_form');
@@ -979,7 +982,7 @@
 
     function hasExtendedSyntax(form) {
         return Array.from(
-            form.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
+            form.querySelectorAll(WRITABLE_TEXT_SELECTOR)
         ).some(input => !input.closest(`.${HELPER_CLASS}`) && hasSequenceSyntax(input));
     }
 
@@ -989,7 +992,7 @@
         const formIds = parseMultiEditIds(form);
         if (formIds.length <= 1) return;
 
-        form.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
+        form.querySelectorAll(WRITABLE_TEXT_SELECTOR)
             .forEach(input => {
                 if (input.closest(`.${HELPER_CLASS}`)) return;
                 if (hasSequenceSyntax(input)) {
@@ -1007,8 +1010,11 @@
         form.setAttribute(FORM_BOUND_ATTR, '1');
 
         function updateInput(input) {
-            if (!(input instanceof HTMLInputElement)) return;
-            if (input.type !== 'text' || input.disabled || input.readOnly) return;
+            const isTextInput = input instanceof HTMLInputElement && input.type === 'text';
+            const isTextarea = input instanceof HTMLTextAreaElement;
+
+            if (!isTextInput && !isTextarea) return;
+            if (input.disabled || input.readOnly) return;
             if (input.closest(`.${HELPER_CLASS}`)) return;
 
             renderHelper(input, parseMultiEditIds(form));
@@ -1030,7 +1036,7 @@
             );
         }, true);
 
-        form.querySelectorAll('input[type="text"]:not([disabled]):not([readonly])')
+        form.querySelectorAll(WRITABLE_TEXT_SELECTOR)
             .forEach(updateInput);
 
         log(`Multi-edit detected for ${parseMultiEditIds(form).length} signs.`);
