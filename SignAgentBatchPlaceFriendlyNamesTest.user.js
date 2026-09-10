@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SignAgent Batch Friendly Names (TEST)
 // @namespace    signbrothers-tools
-// @version      0.5.0
+// @version      0.6.0
 // @description  TEST wrapper around the immutable Batch Place v1.0.0 baseline with human-readable Batch Details and Save All confirmation labels.
 // @match        https://app.signagent.com/*
 // @run-at       document-start
@@ -11,7 +11,7 @@
 
 'use strict';
 
-var SB_BATCH_NAMES_VERSION = '0.5.0';
+var SB_BATCH_NAMES_VERSION = '0.6.0';
 var SB_BATCH_NAMES_LOG_PREFIX = '[SB Batch Names]';
 var SB_BATCH_NAMES_ID_ATTR = 'data-sb-batch-friendly-id';
 var SB_BATCH_NAMES_NATIVE_CONFIRM = unsafeWindow.confirm.bind(unsafeWindow);
@@ -23,6 +23,12 @@ function sbBatchCleanText(value) {
 
 function sbBatchStripLeadingCount(value) {
     return sbBatchCleanText(value).replace(/^\d+\s*/, '').trim();
+}
+
+function sbBatchTextFromHtml(value) {
+    var holder = document.createElement('div');
+    holder.innerHTML = String(value || '');
+    return sbBatchCleanText(holder.textContent || holder.innerText || '');
 }
 
 function sbBatchRememberAndReadId(selector) {
@@ -53,6 +59,71 @@ function sbBatchLabelFromAnchor(prefix, id) {
     return sbBatchStripLeadingCount(anchor ? (anchor.innerText || anchor.textContent || '') : '');
 }
 
+function sbBatchJsTreeInstances() {
+    var jq = unsafeWindow.jQuery || window.jQuery;
+    var instances = [];
+    var seen = new Set();
+
+    if (!jq) return instances;
+
+    document.querySelectorAll('.jstree').forEach(function (tree) {
+        var instance = null;
+
+        try {
+            if (jq.jstree && typeof jq.jstree.reference === 'function') {
+                instance = jq.jstree.reference(tree);
+            }
+
+            if (!instance && typeof jq === 'function') {
+                instance = jq(tree).jstree(true);
+            }
+        } catch (error) {
+            instance = null;
+        }
+
+        if (!instance || seen.has(instance)) return;
+        seen.add(instance);
+        instances.push(instance);
+    });
+
+    return instances;
+}
+
+function sbBatchFindJsTreeNode(nodeId) {
+    if (!nodeId) return null;
+
+    var instances = sbBatchJsTreeInstances();
+
+    for (var i = 0; i < instances.length; i++) {
+        var instance = instances[i];
+        var model = instance && instance._model && instance._model.data;
+        var node = model && model[nodeId];
+
+        if (node) {
+            return {
+                instance: instance,
+                model: model,
+                node: node
+            };
+        }
+    }
+
+    return null;
+}
+
+function sbBatchModelNodeLabel(node) {
+    if (!node) return '';
+    return sbBatchStripLeadingCount(sbBatchTextFromHtml(node.text || ''));
+}
+
+function sbBatchResolveTreeLabel(prefix, id) {
+    var fromDom = sbBatchLabelFromAnchor(prefix, id);
+    if (fromDom) return fromDom;
+
+    var found = sbBatchFindJsTreeNode(prefix + id);
+    return found ? sbBatchModelNodeLabel(found.node) : '';
+}
+
 function sbBatchResolveState(id) {
     if (!id) return '';
 
@@ -72,9 +143,38 @@ function sbBatchResolveState(id) {
     );
 
     var name = sbBatchCleanText((nested && nested.name) || sbBatchLabelFromAnchor('state', id));
-    var parent = sbBatchCleanText((data && data.projectName) || '');
+    var phase = sbBatchCleanText((data && data.projectName) || '');
 
-    return parent && name ? parent + ' → ' + name : (name || parent);
+    if (!name || !phase) {
+        var found = sbBatchFindJsTreeNode('state' + id);
+
+        if (found) {
+            if (!name) {
+                name = sbBatchModelNodeLabel(found.node);
+            }
+
+            if (!phase) {
+                var parentId = found.node.parent;
+                var guard = 0;
+
+                while (parentId && parentId !== '#' && guard < 20) {
+                    var parentNode = found.model[parentId];
+                    if (!parentNode) break;
+
+                    var candidateId = String(parentNode.id || parentId || '');
+                    if (/^phase\d+$/i.test(candidateId)) {
+                        phase = sbBatchModelNodeLabel(parentNode);
+                        break;
+                    }
+
+                    parentId = parentNode.parent;
+                    guard++;
+                }
+            }
+        }
+    }
+
+    return phase && name ? phase + ' → ' + name : (name || phase);
 }
 
 function sbBatchResolveProject(projectId) {
@@ -138,8 +238,8 @@ function sbBatchResolveProject(projectId) {
 function sbBatchResolveFriendly(ids) {
     return {
         project: sbBatchResolveProject(ids.project),
-        location: sbBatchLabelFromAnchor('zone', ids.location),
-        signType: sbBatchLabelFromAnchor('sign_template', ids.signType),
+        location: sbBatchResolveTreeLabel('zone', ids.location),
+        signType: sbBatchResolveTreeLabel('sign_template', ids.signType),
         state: sbBatchResolveState(ids.state)
     };
 }
@@ -168,9 +268,9 @@ function sbBatchBuildFriendlyConfirmation(match) {
 }
 
 /*
- * Deliberately top-level. If Tampermonkey evaluates @require code and the main
- * userscript in one lexical wrapper, this binding is what the immutable Batch
- * Place saveAll() function resolves when it calls bare confirm(...).
+ * Deliberately top-level. Tampermonkey evaluates @require code and this main
+ * userscript in one lexical wrapper, so the immutable Batch Place saveAll()
+ * resolves this binding when it calls bare confirm(...).
  */
 function confirm(message) {
     var text = String(message == null ? '' : message);
@@ -225,4 +325,4 @@ if (document.readyState === 'loading') {
     sbBatchStartFriendlyUi();
 }
 
-console.log(SB_BATCH_NAMES_LOG_PREFIX + ' v' + SB_BATCH_NAMES_VERSION + ' active; lexical confirm test installed.');
+console.log(SB_BATCH_NAMES_LOG_PREFIX + ' v' + SB_BATCH_NAMES_VERSION + ' active; jsTree model fallback enabled.');
