@@ -1,230 +1,228 @@
 // ==UserScript==
 // @name         SignAgent Batch Friendly Names (TEST)
 // @namespace    signbrothers-tools
-// @version      0.4.0
-// @description  TEST wrapper that runs the immutable Batch Place v1.0.0 baseline and adds human-readable Batch Details and Save All confirmation labels.
+// @version      0.5.0
+// @description  TEST wrapper around the immutable Batch Place v1.0.0 baseline with human-readable Batch Details and Save All confirmation labels.
 // @match        https://app.signagent.com/*
 // @run-at       document-start
 // @grant        unsafeWindow
 // @require      https://raw.githubusercontent.com/JPSignBros/SignAgentScripts/ed659e54c845c408a9efd7479b3b84552d20cb82/SignAgentBatchPlace.user.js
 // ==/UserScript==
 
-(function () {
-    'use strict';
+'use strict';
 
-    const VERSION = '0.4.0';
-    const LOG_PREFIX = '[SB Batch Names]';
-    const ID_ATTR = 'data-sb-batch-friendly-id';
-    const BATCH_CONFIRM_RE =
-        /^Create (\d+) sign(s?)\?\n\nProject: (\d+)\nLocation: (\d+)\nSign Type: (\d+)\nState: (\d+)$/;
+var SB_BATCH_NAMES_VERSION = '0.5.0';
+var SB_BATCH_NAMES_LOG_PREFIX = '[SB Batch Names]';
+var SB_BATCH_NAMES_ID_ATTR = 'data-sb-batch-friendly-id';
+var SB_BATCH_NAMES_NATIVE_CONFIRM = unsafeWindow.confirm.bind(unsafeWindow);
+var SB_BATCH_NAMES_CONFIRM_RE = /^Create (\d+) sign(s?)\?\n\nProject: (\d+)\nLocation: (\d+)\nSign Type: (\d+)\nState: (\d+)$/;
 
-    function cleanText(value) {
-        return String(value || '').replace(/\s+/g, ' ').trim();
+function sbBatchCleanText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function sbBatchStripLeadingCount(value) {
+    return sbBatchCleanText(value).replace(/^\d+\s*/, '').trim();
+}
+
+function sbBatchRememberAndReadId(selector) {
+    var el = document.querySelector(selector);
+    if (!el) return '';
+
+    var text = sbBatchCleanText(el.textContent);
+    if (/^\d+$/.test(text)) {
+        el.setAttribute(SB_BATCH_NAMES_ID_ATTR, text);
+        return text;
     }
 
-    function stripLeadingCount(value) {
-        return cleanText(value).replace(/^\d+\s*/, '').trim();
+    return sbBatchCleanText(el.getAttribute(SB_BATCH_NAMES_ID_ATTR));
+}
+
+function sbBatchReadIds() {
+    return {
+        project: sbBatchRememberAndReadId('#sa-batch-project'),
+        location: sbBatchRememberAndReadId('#sa-batch-location'),
+        signType: sbBatchRememberAndReadId('#sa-batch-type'),
+        state: sbBatchRememberAndReadId('#sa-batch-state')
+    };
+}
+
+function sbBatchLabelFromAnchor(prefix, id) {
+    if (!id) return '';
+    var anchor = document.getElementById(prefix + id + '_anchor');
+    return sbBatchStripLeadingCount(anchor ? (anchor.innerText || anchor.textContent || '') : '');
+}
+
+function sbBatchResolveState(id) {
+    if (!id) return '';
+
+    var node = document.getElementById('state' + id);
+    var data = null;
+
+    try {
+        data = JSON.parse(node ? (node.getAttribute('data-jstree') || 'null') : 'null');
+    } catch (error) {
+        data = null;
     }
 
-    function rememberAndReadId(selector) {
-        const el = document.querySelector(selector);
-        if (!el) return '';
-
-        const text = cleanText(el.textContent);
-        if (/^\d+$/.test(text)) {
-            el.setAttribute(ID_ATTR, text);
-            return text;
-        }
-
-        return cleanText(el.getAttribute(ID_ATTR));
-    }
-
-    function readBatchIds() {
-        return {
-            project: rememberAndReadId('#sa-batch-project'),
-            location: rememberAndReadId('#sa-batch-location'),
-            signType: rememberAndReadId('#sa-batch-type'),
-            state: rememberAndReadId('#sa-batch-state')
-        };
-    }
-
-    function labelFromAnchor(prefix, id) {
-        if (!id) return '';
-        const anchor = document.getElementById(`${prefix}${id}_anchor`);
-        return stripLeadingCount(anchor?.innerText || anchor?.textContent || '');
-    }
-
-    function resolveLocationName(id) {
-        return labelFromAnchor('zone', id);
-    }
-
-    function resolveSignTypeName(id) {
-        return labelFromAnchor('sign_template', id);
-    }
-
-    function resolveState(id) {
-        if (!id) return '';
-
-        const node = document.getElementById(`state${id}`);
-        let data = null;
-
-        try {
-            data = JSON.parse(node?.getAttribute('data-jstree') || 'null');
-        } catch (error) {
-            data = null;
-        }
-
-        const nested =
-            data?.create_order_with_signs_and_install ||
-            data?.create_order_with_signs ||
-            data?.create_order_with_install ||
-            null;
-
-        const name = cleanText(nested?.name || labelFromAnchor('state', id));
-        const parent = cleanText(data?.projectName || '');
-
-        return parent && name ? `${parent} → ${name}` : (name || parent);
-    }
-
-    function resolveProjectName(projectId) {
-        const candidates = [];
-        const seen = new Set();
-
-        function add(rawText, score) {
-            let text = cleanText(rawText);
-            if (!text) return;
-
-            text = text
-                .replace(/\s*[|–—-]\s*SignAgent\s*$/i, '')
-                .replace(/^SignAgent\s*[|–—-]\s*/i, '')
-                .trim();
-
-            if (!text || text === String(projectId)) return;
-            if (/^(map|export|settings|new folder|new project|manage fonts|new location|batch import)$/i.test(text)) return;
-            if (text.length > 140 || !/[A-Za-z]/.test(text)) return;
-
-            const key = text.toLowerCase();
-            if (seen.has(key)) return;
-            seen.add(key);
-            candidates.push({ text, score });
-        }
-
-        add(document.title, 100);
-
-        for (const selector of [
-            '[data-project-name]',
-            '#project_name',
-            '#project-name',
-            '.project-name',
-            '.project_name',
-            '.breadcrumb li',
-            '.breadcrumb a',
-            'h1',
-            'h2'
-        ]) {
-            document.querySelectorAll(selector).forEach(el => {
-                const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-                add(el.innerText || el.textContent, visible ? 80 : 25);
-            });
-        }
-
-        if (projectId) {
-            document.querySelectorAll('a[href]').forEach(anchor => {
-                const href = anchor.getAttribute('href') || '';
-                if (href.includes(`/organization/${projectId}/`)) {
-                    add(anchor.innerText || anchor.textContent, 40);
-                }
-            });
-        }
-
-        candidates.sort((a, b) => b.score - a.score || a.text.length - b.text.length);
-        return candidates[0]?.text || '';
-    }
-
-    function resolveFriendly(ids) {
-        return {
-            project: resolveProjectName(ids.project),
-            location: resolveLocationName(ids.location),
-            signType: resolveSignTypeName(ids.signType),
-            state: resolveState(ids.state)
-        };
-    }
-
-    function setFriendlyPanelValue(selector, id, friendly) {
-        const el = document.querySelector(selector);
-        if (!el || !id) return;
-
-        el.setAttribute(ID_ATTR, id);
-        el.title = `SignAgent ID: ${id}`;
-        el.textContent = friendly || id;
-    }
-
-    function refreshBatchDetails() {
-        const ids = readBatchIds();
-        if (!ids.project && !ids.location && !ids.signType && !ids.state) return;
-
-        const friendly = resolveFriendly(ids);
-        setFriendlyPanelValue('#sa-batch-project', ids.project, friendly.project);
-        setFriendlyPanelValue('#sa-batch-location', ids.location, friendly.location);
-        setFriendlyPanelValue('#sa-batch-type', ids.signType, friendly.signType);
-        setFriendlyPanelValue('#sa-batch-state', ids.state, friendly.state);
-    }
-
-    function buildFriendlyConfirmation(match) {
-        const count = match[1];
-        const ids = {
-            project: match[3],
-            location: match[4],
-            signType: match[5],
-            state: match[6]
-        };
-        const friendly = resolveFriendly(ids);
-        const show = (name, id) => name || id;
-
-        return (
-            `Create ${count} sign${count === '1' ? '' : 's'}?\n\n` +
-            `Project: ${show(friendly.project, ids.project)}\n` +
-            `Location: ${show(friendly.location, ids.location)}\n` +
-            `Sign Type: ${show(friendly.signType, ids.signType)}\n` +
-            `State: ${show(friendly.state, ids.state)}`
-        );
-    }
-
-    const nativeConfirm = window.confirm.bind(window);
-
-    function friendlyConfirm(message) {
-        const text = String(message ?? '');
-        const match = text.match(BATCH_CONFIRM_RE);
-
-        if (!match) {
-            return nativeConfirm(message);
-        }
-
-        const friendlyMessage = buildFriendlyConfirmation(match);
-        console.log(`${LOG_PREFIX} rewrote Batch Place confirmation`, {
-            original: text,
-            friendly: friendlyMessage
-        });
-
-        return nativeConfirm(friendlyMessage);
-    }
-
-    window.confirm = friendlyConfirm;
-    globalThis.confirm = friendlyConfirm;
-    self.confirm = friendlyConfirm;
-
-    function startUiRefresh() {
-        refreshBatchDetails();
-        setInterval(refreshBatchDetails, 250);
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', startUiRefresh, { once: true });
-    } else {
-        startUiRefresh();
-    }
-
-    console.log(
-        `${LOG_PREFIX} v${VERSION} active in the same sandbox as immutable Batch Place v1.0.0.`
+    var nested = data && (
+        data.create_order_with_signs_and_install ||
+        data.create_order_with_signs ||
+        data.create_order_with_install
     );
-})();
+
+    var name = sbBatchCleanText((nested && nested.name) || sbBatchLabelFromAnchor('state', id));
+    var parent = sbBatchCleanText((data && data.projectName) || '');
+
+    return parent && name ? parent + ' → ' + name : (name || parent);
+}
+
+function sbBatchResolveProject(projectId) {
+    var candidates = [];
+    var seen = new Set();
+
+    function add(rawText, score) {
+        var text = sbBatchCleanText(rawText);
+        if (!text) return;
+
+        text = text
+            .replace(/\s*[|\u2013\u2014-]\s*SignAgent\s*$/i, '')
+            .replace(/^SignAgent\s*[|\u2013\u2014-]\s*/i, '')
+            .trim();
+
+        if (!text || text === String(projectId)) return;
+        if (/^(map|export|settings|new folder|new project|manage fonts|new location|batch import)$/i.test(text)) return;
+        if (text.length > 140 || !/[A-Za-z]/.test(text)) return;
+
+        var key = text.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        candidates.push({ text: text, score: score });
+    }
+
+    add(document.title, 100);
+
+    [
+        '[data-project-name]',
+        '#project_name',
+        '#project-name',
+        '.project-name',
+        '.project_name',
+        '.breadcrumb li',
+        '.breadcrumb a',
+        'h1',
+        'h2'
+    ].forEach(function (selector) {
+        document.querySelectorAll(selector).forEach(function (el) {
+            var visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            add(el.innerText || el.textContent, visible ? 80 : 25);
+        });
+    });
+
+    if (projectId) {
+        document.querySelectorAll('a[href]').forEach(function (anchor) {
+            var href = anchor.getAttribute('href') || '';
+            if (href.includes('/organization/' + projectId + '/')) {
+                add(anchor.innerText || anchor.textContent, 40);
+            }
+        });
+    }
+
+    candidates.sort(function (a, b) {
+        return b.score - a.score || a.text.length - b.text.length;
+    });
+
+    return candidates.length ? candidates[0].text : '';
+}
+
+function sbBatchResolveFriendly(ids) {
+    return {
+        project: sbBatchResolveProject(ids.project),
+        location: sbBatchLabelFromAnchor('zone', ids.location),
+        signType: sbBatchLabelFromAnchor('sign_template', ids.signType),
+        state: sbBatchResolveState(ids.state)
+    };
+}
+
+function sbBatchBuildFriendlyConfirmation(match) {
+    var count = match[1];
+    var ids = {
+        project: match[3],
+        location: match[4],
+        signType: match[5],
+        state: match[6]
+    };
+    var friendly = sbBatchResolveFriendly(ids);
+
+    function show(name, id) {
+        return name || id;
+    }
+
+    return (
+        'Create ' + count + ' sign' + (count === '1' ? '' : 's') + '?\n\n' +
+        'Project: ' + show(friendly.project, ids.project) + '\n' +
+        'Location: ' + show(friendly.location, ids.location) + '\n' +
+        'Sign Type: ' + show(friendly.signType, ids.signType) + '\n' +
+        'State: ' + show(friendly.state, ids.state)
+    );
+}
+
+/*
+ * Deliberately top-level. If Tampermonkey evaluates @require code and the main
+ * userscript in one lexical wrapper, this binding is what the immutable Batch
+ * Place saveAll() function resolves when it calls bare confirm(...).
+ */
+function confirm(message) {
+    var text = String(message == null ? '' : message);
+    var match = text.match(SB_BATCH_NAMES_CONFIRM_RE);
+
+    if (!match) {
+        return SB_BATCH_NAMES_NATIVE_CONFIRM(message);
+    }
+
+    var friendlyMessage = sbBatchBuildFriendlyConfirmation(match);
+    console.log(SB_BATCH_NAMES_LOG_PREFIX + ' lexical confirm intercepted Batch Place', {
+        original: text,
+        friendly: friendlyMessage
+    });
+
+    return SB_BATCH_NAMES_NATIVE_CONFIRM(friendlyMessage);
+}
+
+function sbBatchSetPanelValue(selector, id, friendly) {
+    var el = document.querySelector(selector);
+    if (!el || !id) return;
+
+    el.setAttribute(SB_BATCH_NAMES_ID_ATTR, id);
+    el.title = 'SignAgent ID: ' + id;
+    el.textContent = friendly || id;
+}
+
+function sbBatchRefreshDetails() {
+    var ids = sbBatchReadIds();
+    if (!ids.project && !ids.location && !ids.signType && !ids.state) return;
+
+    var friendly = sbBatchResolveFriendly(ids);
+    sbBatchSetPanelValue('#sa-batch-project', ids.project, friendly.project);
+    sbBatchSetPanelValue('#sa-batch-location', ids.location, friendly.location);
+    sbBatchSetPanelValue('#sa-batch-type', ids.signType, friendly.signType);
+    sbBatchSetPanelValue('#sa-batch-state', ids.state, friendly.state);
+}
+
+/* Also patch properties for any calls that explicitly use window/globalThis. */
+try { window.confirm = confirm; } catch (error) {}
+try { globalThis.confirm = confirm; } catch (error) {}
+try { self.confirm = confirm; } catch (error) {}
+
+function sbBatchStartFriendlyUi() {
+    sbBatchRefreshDetails();
+    setInterval(sbBatchRefreshDetails, 250);
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', sbBatchStartFriendlyUi, { once: true });
+} else {
+    sbBatchStartFriendlyUi();
+}
+
+console.log(SB_BATCH_NAMES_LOG_PREFIX + ' v' + SB_BATCH_NAMES_VERSION + ' active; lexical confirm test installed.');
