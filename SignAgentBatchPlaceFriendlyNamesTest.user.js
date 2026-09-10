@@ -1,21 +1,22 @@
 // ==UserScript==
 // @name         SignAgent Batch Friendly Names (TEST)
 // @namespace    signbrothers-tools
-// @version      0.2.0
-// @description  Read-only companion for Tyler's Batch Place script that resolves friendly Project, Location, Sign Type, and State labels.
+// @version      0.3.0
+// @description  Read-only UX companion for Tyler's Batch Place script. Shows friendly labels in Batch Details and rewrites only the Batch Place confirmation dialog.
 // @match        https://app.signagent.com/*
-// @run-at       document-idle
-// @grant        none
+// @run-at       document-start
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    const VERSION = '0.2.0';
+    const VERSION = '0.3.0';
     const LOG_PREFIX = '[SB Batch Names]';
-    const WRAPPER_ID = 'sb-batch-friendly-preview';
-    const BUTTON_ID = 'sb-batch-friendly-refresh';
-    const OUTPUT_ID = 'sb-batch-friendly-output';
+    const PAGE = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const ID_ATTR = 'data-sb-batch-friendly-id';
+    const BATCH_CONFIRM_RE =
+        /^Create (\d+) sign(s?)\?\n\nProject: (\d+)\nLocation: (\d+)\nSign Type: (\d+)\nState: (\d+)$/;
 
     function cleanText(value) {
         return String(value || '').replace(/\s+/g, ' ').trim();
@@ -25,13 +26,25 @@
         return cleanText(value).replace(/^\d+\s*/, '').trim();
     }
 
+    function rememberAndReadId(selector) {
+        const el = document.querySelector(selector);
+        if (!el) return '';
+
+        const text = cleanText(el.textContent);
+        if (/^\d+$/.test(text)) {
+            el.setAttribute(ID_ATTR, text);
+            return text;
+        }
+
+        return cleanText(el.getAttribute(ID_ATTR));
+    }
+
     function readBatchIds() {
-        const read = selector => cleanText(document.querySelector(selector)?.textContent || '');
         return {
-            project: read('#sa-batch-project'),
-            location: read('#sa-batch-location'),
-            signType: read('#sa-batch-type'),
-            state: read('#sa-batch-state')
+            project: rememberAndReadId('#sa-batch-project'),
+            location: rememberAndReadId('#sa-batch-location'),
+            signType: rememberAndReadId('#sa-batch-type'),
+            state: rememberAndReadId('#sa-batch-state')
         };
     }
 
@@ -128,121 +141,113 @@
         }
 
         rows.sort((a, b) => b.score - a.score || a.text.length - b.text.length);
-        return rows.slice(0, 20);
+        return rows;
     }
 
-    function resolveFriendlyData() {
-        const ids = readBatchIds();
+    function resolveFriendlyData(ids = readBatchIds()) {
         const state = resolveState(ids.state);
         const projects = projectCandidates(ids.project);
 
         return {
-            version: VERSION,
             ids,
             friendly: {
                 project: projects[0]?.text || '',
                 location: resolveLocationName(ids.location),
                 signType: resolveSignTypeName(ids.signType),
                 state: state.display
-            },
-            stateParts: state,
-            projectCandidates: projects
+            }
         };
     }
 
-    function renderPreview() {
-        const result = resolveFriendlyData();
-        const output = document.getElementById(OUTPUT_ID);
-        if (!output) return result;
+    function setFriendlyPanelValue(selector, id, friendly) {
+        const el = document.querySelector(selector);
+        if (!el || !id) return;
 
-        const row = (label, friendly, id) => {
-            const value = friendly || `Not resolved yet (${id || '?'})`;
-            const suffix = friendly && id ? ` <span style="color:#888;font-weight:400">[${id}]</span>` : '';
-            return `<div style="margin:4px 0"><strong>${label}:</strong> ${escapeHtml(value)}${suffix}</div>`;
+        el.setAttribute(ID_ATTR, id);
+        el.title = `SignAgent ID: ${id}`;
+        el.textContent = friendly || id;
+    }
+
+    function refreshBatchDetails() {
+        const ids = readBatchIds();
+        if (!ids.project && !ids.location && !ids.signType && !ids.state) return;
+
+        const result = resolveFriendlyData(ids);
+
+        setFriendlyPanelValue('#sa-batch-project', ids.project, result.friendly.project);
+        setFriendlyPanelValue('#sa-batch-location', ids.location, result.friendly.location);
+        setFriendlyPanelValue('#sa-batch-type', ids.signType, result.friendly.signType);
+        setFriendlyPanelValue('#sa-batch-state', ids.state, result.friendly.state);
+    }
+
+    function buildFriendlyConfirmation(match) {
+        const count = match[1];
+        const ids = {
+            project: match[3],
+            location: match[4],
+            signType: match[5],
+            state: match[6]
+        };
+        const result = resolveFriendlyData(ids);
+        const show = (friendly, id) => friendly || id;
+
+        return (
+            `Create ${count} sign${count === '1' ? '' : 's'}?\n\n` +
+            `Project: ${show(result.friendly.project, ids.project)}\n` +
+            `Location: ${show(result.friendly.location, ids.location)}\n` +
+            `Sign Type: ${show(result.friendly.signType, ids.signType)}\n` +
+            `State: ${show(result.friendly.state, ids.state)}`
+        );
+    }
+
+    function installConfirmInterceptor(target) {
+        if (!target || typeof target.confirm !== 'function') return;
+        if (target.confirm.__sbBatchFriendlyNames) return;
+
+        const nativeConfirm = target.confirm.bind(target);
+        const wrappedConfirm = function (message) {
+            const text = String(message ?? '');
+            const match = text.match(BATCH_CONFIRM_RE);
+            if (!match) return nativeConfirm(message);
+
+            const friendlyMessage = buildFriendlyConfirmation(match);
+            console.log(`${LOG_PREFIX} rewrote Batch Place confirmation`, {
+                original: text,
+                friendly: friendlyMessage
+            });
+            return nativeConfirm(friendlyMessage);
         };
 
-        output.innerHTML =
-            row('Project', result.friendly.project, result.ids.project) +
-            row('Location', result.friendly.location, result.ids.location) +
-            row('Sign Type', result.friendly.signType, result.ids.signType) +
-            row('State', result.friendly.state, result.ids.state);
-
-        console.group(`${LOG_PREFIX} preview v${VERSION}`);
-        console.log('Resolved:', result.friendly);
-        console.log('IDs:', result.ids);
-        console.log('Project candidates:', result.projectCandidates);
-        console.log('COPYABLE JSON:');
-        console.log(JSON.stringify(result, null, 2));
-        console.groupEnd();
-
-        return result;
-    }
-
-    function escapeHtml(value) {
-        return String(value || '')
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-    }
-
-    function installUi() {
-        const details = document.querySelector('#sa-batch-details');
-        if (!details || document.getElementById(WRAPPER_ID)) return false;
-
-        const wrapper = document.createElement('div');
-        wrapper.id = WRAPPER_ID;
-        Object.assign(wrapper.style, {
-            marginTop: '10px',
-            paddingTop: '8px',
-            borderTop: '1px solid #ddd',
-            fontSize: '11px',
-            lineHeight: '1.35'
+        Object.defineProperty(wrappedConfirm, '__sbBatchFriendlyNames', {
+            value: true
         });
 
-        const title = document.createElement('div');
-        title.textContent = `Friendly Names TEST v${VERSION}`;
-        title.style.fontWeight = '700';
-        title.style.marginBottom = '5px';
-
-        const output = document.createElement('div');
-        output.id = OUTPUT_ID;
-        output.textContent = 'Reading labels...';
-
-        const button = document.createElement('button');
-        button.id = BUTTON_ID;
-        button.type = 'button';
-        button.textContent = 'Refresh Friendly Preview';
-        Object.assign(button.style, {
-            width: '100%',
-            marginTop: '7px',
-            padding: '6px',
-            cursor: 'pointer'
-        });
-
-        button.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            renderPreview();
-        });
-
-        wrapper.appendChild(title);
-        wrapper.appendChild(output);
-        wrapper.appendChild(button);
-        details.appendChild(wrapper);
-
-        renderPreview();
-        console.log(`${LOG_PREFIX} v${VERSION} attached. Tyler's Batch Place file remains untouched.`);
-        return true;
+        try {
+            target.confirm = wrappedConfirm;
+        } catch (error) {
+            console.warn(`${LOG_PREFIX} could not patch confirm on one window context`, error);
+        }
     }
 
-    if (!installUi()) {
-        const observer = new MutationObserver(() => {
-            if (installUi()) observer.disconnect();
-        });
+    function start() {
+        installConfirmInterceptor(PAGE);
+        if (window !== PAGE) installConfirmInterceptor(window);
 
-        observer.observe(document.documentElement, { childList: true, subtree: true });
-        setInterval(installUi, 1500);
+        const refresh = () => {
+            installConfirmInterceptor(PAGE);
+            if (window !== PAGE) installConfirmInterceptor(window);
+            refreshBatchDetails();
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', refresh, { once: true });
+        } else {
+            refresh();
+        }
+
+        setInterval(refresh, 750);
+        console.log(`${LOG_PREFIX} v${VERSION} active. Original Batch Place script is unchanged.`);
     }
+
+    start();
 })();
