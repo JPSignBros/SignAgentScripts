@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SignAgent Batch Friendly Names (TEST)
 // @namespace    signbrothers-tools
-// @version      0.1.0
-// @description  Diagnostic companion for Tyler's Batch Place script. Finds human-readable labels for the IDs Batch Place already knows without changing placement behavior.
+// @version      0.2.0
+// @description  Read-only companion for Tyler's Batch Place script that resolves friendly Project, Location, Sign Type, and State labels.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
 // @grant        none
@@ -11,134 +11,22 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.1.0';
+    const VERSION = '0.2.0';
     const LOG_PREFIX = '[SB Batch Names]';
-    const BUTTON_ID = 'sb-batch-name-scan';
-    const OUTPUT_ID = 'sb-batch-name-output';
+    const WRAPPER_ID = 'sb-batch-friendly-preview';
+    const BUTTON_ID = 'sb-batch-friendly-refresh';
+    const OUTPUT_ID = 'sb-batch-friendly-output';
 
     function cleanText(value) {
-        return String(value || '')
-            .replace(/\s+/g, ' ')
-            .trim();
+        return String(value || '').replace(/\s+/g, ' ').trim();
     }
 
-    function isUsefulText(text, id) {
-        const cleaned = cleanText(text);
-        if (!cleaned) return false;
-        if (cleaned === String(id)) return false;
-        if (/^\d+$/.test(cleaned)) return false;
-        if (cleaned.length > 220) return false;
-        return true;
-    }
-
-    function isVisible(el) {
-        if (!(el instanceof Element)) return false;
-        const style = getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden') return false;
-        const rect = el.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-    }
-
-    function idAppearsAsToken(value, id) {
-        const text = String(value || '');
-        const escaped = String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        return new RegExp(`(^|\\D)${escaped}(?!\\d)`).test(text);
-    }
-
-    function describeElement(el, id, reason) {
-        const ownText = cleanText(el.innerText || el.textContent);
-        const parentText = cleanText(el.parentElement?.innerText || '');
-        const grandparentText = cleanText(el.parentElement?.parentElement?.innerText || '');
-
-        let label = '';
-        if (isUsefulText(ownText, id)) label = ownText;
-        else if (isUsefulText(parentText, id)) label = parentText;
-        else if (isUsefulText(grandparentText, id)) label = grandparentText;
-
-        if (!label) return null;
-
-        const attrs = {};
-        for (const attr of Array.from(el.attributes || [])) {
-            if (attr.name === 'style') continue;
-            if (idAppearsAsToken(attr.value, id)) attrs[attr.name] = attr.value;
-        }
-
-        return {
-            label,
-            tag: el.tagName.toLowerCase(),
-            id: el.id || '',
-            className: cleanText(el.className || '').slice(0, 160),
-            reason,
-            visible: isVisible(el),
-            matchingAttributes: attrs
-        };
-    }
-
-    function findCandidates(id) {
-        if (!id) return [];
-
-        const found = [];
-        const seen = new Set();
-
-        for (const el of document.querySelectorAll('*')) {
-            let reason = '';
-
-            for (const attr of Array.from(el.attributes || [])) {
-                if (attr.name === 'style') continue;
-                if (idAppearsAsToken(attr.value, id)) {
-                    reason = `${attr.name} contains ${id}`;
-                    break;
-                }
-            }
-
-            if (!reason) continue;
-
-            const item = describeElement(el, id, reason);
-            if (!item) continue;
-
-            const key = `${item.label}|${item.tag}|${item.reason}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            found.push(item);
-        }
-
-        found.sort((a, b) => {
-            if (a.visible !== b.visible) return a.visible ? -1 : 1;
-            return a.label.length - b.label.length;
-        });
-
-        return found.slice(0, 15);
-    }
-
-    function activeUiText() {
-        const selectors = [
-            '.active',
-            '.selected',
-            '.jstree-clicked',
-            '.jstree-wholerow-clicked',
-            '[aria-selected="true"]'
-        ];
-
-        const rows = [];
-        const seen = new Set();
-
-        for (const selector of selectors) {
-            for (const el of document.querySelectorAll(selector)) {
-                const text = cleanText(el.innerText || el.textContent);
-                if (!text || text.length > 220) continue;
-                const key = `${selector}|${text}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                rows.push({ selector, text, tag: el.tagName.toLowerCase(), id: el.id || '' });
-            }
-        }
-
-        return rows.slice(0, 50);
+    function stripLeadingCount(value) {
+        return cleanText(value).replace(/^\d+\s*/, '').trim();
     }
 
     function readBatchIds() {
-        const read = id => cleanText(document.querySelector(id)?.textContent || '');
-
+        const read = selector => cleanText(document.querySelector(selector)?.textContent || '');
         return {
             project: read('#sa-batch-project'),
             location: read('#sa-batch-location'),
@@ -147,80 +35,205 @@
         };
     }
 
-    function runScan() {
-        const ids = readBatchIds();
+    function labelFromAnchor(prefix, id) {
+        if (!id) return '';
+        const anchor = document.getElementById(`${prefix}${id}_anchor`);
+        return stripLeadingCount(anchor?.innerText || anchor?.textContent || '');
+    }
 
-        const result = {
+    function resolveLocationName(id) {
+        return labelFromAnchor('zone', id);
+    }
+
+    function resolveSignTypeName(id) {
+        return labelFromAnchor('sign_template', id);
+    }
+
+    function resolveState(id) {
+        if (!id) return { name: '', parent: '', display: '' };
+
+        const node = document.getElementById(`state${id}`);
+        let data = null;
+
+        try {
+            data = JSON.parse(node?.getAttribute('data-jstree') || 'null');
+        } catch (error) {
+            data = null;
+        }
+
+        const nested =
+            data?.create_order_with_signs_and_install ||
+            data?.create_order_with_signs ||
+            data?.create_order_with_install ||
+            null;
+
+        const name = cleanText(nested?.name || labelFromAnchor('state', id));
+        const parent = cleanText(data?.projectName || '');
+        const display = parent && name ? `${parent} → ${name}` : (name || parent);
+
+        return { name, parent, display };
+    }
+
+    function projectCandidates(projectId) {
+        const rows = [];
+        const seen = new Set();
+
+        function add(source, rawText, score) {
+            let text = cleanText(rawText);
+            if (!text) return;
+
+            text = text
+                .replace(/\s*[|–—-]\s*SignAgent\s*$/i, '')
+                .replace(/^SignAgent\s*[|–—-]\s*/i, '')
+                .trim();
+
+            if (!text || text === String(projectId)) return;
+            if (/^(map|export|settings|new folder|new project|manage fonts|new location|batch import)$/i.test(text)) return;
+            if (text.length > 140) return;
+            if (!/[A-Za-z]/.test(text)) return;
+
+            const key = text.toLowerCase();
+            if (seen.has(key)) return;
+            seen.add(key);
+            rows.push({ source, text, score });
+        }
+
+        add('document.title', document.title, 100);
+
+        const directSelectors = [
+            '[data-project-name]',
+            '#project_name',
+            '#project-name',
+            '.project-name',
+            '.project_name',
+            '.breadcrumb li',
+            '.breadcrumb a',
+            'h1',
+            'h2'
+        ];
+
+        for (const selector of directSelectors) {
+            document.querySelectorAll(selector).forEach(el => {
+                const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                add(`${selector}${visible ? ':visible' : ''}`, el.innerText || el.textContent, visible ? 80 : 25);
+            });
+        }
+
+        if (projectId) {
+            document.querySelectorAll('a[href]').forEach(anchor => {
+                const href = anchor.getAttribute('href') || '';
+                if (!href.includes(`/organization/${projectId}/`)) return;
+                add('organization-link', anchor.innerText || anchor.textContent, 40);
+            });
+        }
+
+        rows.sort((a, b) => b.score - a.score || a.text.length - b.text.length);
+        return rows.slice(0, 20);
+    }
+
+    function resolveFriendlyData() {
+        const ids = readBatchIds();
+        const state = resolveState(ids.state);
+        const projects = projectCandidates(ids.project);
+
+        return {
             version: VERSION,
-            page: location.pathname + location.search,
-            batchIds: ids,
-            candidates: {
-                project: findCandidates(ids.project),
-                location: findCandidates(ids.location),
-                signType: findCandidates(ids.signType),
-                state: findCandidates(ids.state)
+            ids,
+            friendly: {
+                project: projects[0]?.text || '',
+                location: resolveLocationName(ids.location),
+                signType: resolveSignTypeName(ids.signType),
+                state: state.display
             },
-            activeUi: activeUiText()
+            stateParts: state,
+            projectCandidates: projects
+        };
+    }
+
+    function renderPreview() {
+        const result = resolveFriendlyData();
+        const output = document.getElementById(OUTPUT_ID);
+        if (!output) return result;
+
+        const row = (label, friendly, id) => {
+            const value = friendly || `Not resolved yet (${id || '?'})`;
+            const suffix = friendly && id ? ` <span style="color:#888;font-weight:400">[${id}]</span>` : '';
+            return `<div style="margin:4px 0"><strong>${label}:</strong> ${escapeHtml(value)}${suffix}</div>`;
         };
 
-        console.group(`${LOG_PREFIX} diagnostic v${VERSION}`);
-        console.log('Batch IDs:', ids);
-        console.log('Project candidates:', result.candidates.project);
-        console.log('Location candidates:', result.candidates.location);
-        console.log('Sign Type candidates:', result.candidates.signType);
-        console.log('State candidates:', result.candidates.state);
-        console.log('Active/selected UI text:', result.activeUi);
+        output.innerHTML =
+            row('Project', result.friendly.project, result.ids.project) +
+            row('Location', result.friendly.location, result.ids.location) +
+            row('Sign Type', result.friendly.signType, result.ids.signType) +
+            row('State', result.friendly.state, result.ids.state);
+
+        console.group(`${LOG_PREFIX} preview v${VERSION}`);
+        console.log('Resolved:', result.friendly);
+        console.log('IDs:', result.ids);
+        console.log('Project candidates:', result.projectCandidates);
         console.log('COPYABLE JSON:');
         console.log(JSON.stringify(result, null, 2));
         console.groupEnd();
 
-        const output = document.getElementById(OUTPUT_ID);
-        if (output) {
-            output.textContent =
-                `Scan complete. IDs: P ${ids.project || '?'} | L ${ids.location || '?'} | ` +
-                `Type ${ids.signType || '?'} | State ${ids.state || '?'}. ` +
-                'Open DevTools Console and copy the JSON under [SB Batch Names].';
-        }
-
         return result;
+    }
+
+    function escapeHtml(value) {
+        return String(value || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     }
 
     function installUi() {
         const details = document.querySelector('#sa-batch-details');
-        if (!details || document.getElementById(BUTTON_ID)) return false;
+        if (!details || document.getElementById(WRAPPER_ID)) return false;
 
         const wrapper = document.createElement('div');
-        wrapper.style.marginTop = '10px';
-        wrapper.style.paddingTop = '8px';
-        wrapper.style.borderTop = '1px solid #ddd';
+        wrapper.id = WRAPPER_ID;
+        Object.assign(wrapper.style, {
+            marginTop: '10px',
+            paddingTop: '8px',
+            borderTop: '1px solid #ddd',
+            fontSize: '11px',
+            lineHeight: '1.35'
+        });
+
+        const title = document.createElement('div');
+        title.textContent = `Friendly Names TEST v${VERSION}`;
+        title.style.fontWeight = '700';
+        title.style.marginBottom = '5px';
+
+        const output = document.createElement('div');
+        output.id = OUTPUT_ID;
+        output.textContent = 'Reading labels...';
 
         const button = document.createElement('button');
         button.id = BUTTON_ID;
         button.type = 'button';
-        button.textContent = 'Scan Friendly Names (TEST)';
-        button.style.width = '100%';
-        button.style.padding = '6px';
-        button.style.cursor = 'pointer';
-
-        const output = document.createElement('div');
-        output.id = OUTPUT_ID;
-        output.style.marginTop = '5px';
-        output.style.fontSize = '10px';
-        output.style.lineHeight = '1.35';
-        output.style.color = '#666';
-        output.textContent = `Diagnostic companion v${VERSION}. No sign data is changed.`;
+        button.textContent = 'Refresh Friendly Preview';
+        Object.assign(button.style, {
+            width: '100%',
+            marginTop: '7px',
+            padding: '6px',
+            cursor: 'pointer'
+        });
 
         button.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
-            runScan();
+            renderPreview();
         });
 
-        wrapper.appendChild(button);
+        wrapper.appendChild(title);
         wrapper.appendChild(output);
+        wrapper.appendChild(button);
         details.appendChild(wrapper);
 
-        console.log(`${LOG_PREFIX} v${VERSION} attached. Tyler's Batch Place file was not modified.`);
+        renderPreview();
+        console.log(`${LOG_PREFIX} v${VERSION} attached. Tyler's Batch Place file remains untouched.`);
         return true;
     }
 
@@ -230,7 +243,6 @@
         });
 
         observer.observe(document.documentElement, { childList: true, subtree: true });
-
         setInterval(installUi, 1500);
     }
 })();
