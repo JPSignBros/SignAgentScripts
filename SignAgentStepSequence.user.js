@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SignAgent Step Sequence (TEST)
 // @namespace    signbrothers-tools
-// @version      0.3.1
-// @description  Adds fast {start:step} sequencing plus an editable {seq} mapping tool to SignAgent writable text fields.
+// @version      0.3.2
+// @description  Adds fast {start:step}, editable {seq}, and vertical {seqv} sequencing to SignAgent writable text fields.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
 // @grant        none
@@ -11,7 +11,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.3.1';
+    const VERSION = '0.3.2';
     const LOG_PREFIX = '[SB Sequence Tool]';
     const HELPER_CLASS = 'sb-sequence-helper';
     const ACTION_BUTTON_CLASS = 'sb-sequence-action';
@@ -128,8 +128,20 @@
         return /^\{\s*seq\s*\}$/i.test(String(value || '').trim());
     }
 
+    function isSeqvSyntax(value) {
+        return /^\{\s*seqv\s*\}$/i.test(String(value || '').trim());
+    }
+
     function hasSequenceSyntax(input) {
-        return Boolean(parseStepSyntax(input.value) || isSeqSyntax(input.value));
+        return Boolean(
+            parseStepSyntax(input.value) ||
+            isSeqSyntax(input.value) ||
+            isSeqvSyntax(input.value)
+        );
+    }
+
+    function verticalizeValue(value) {
+        return Array.from(String(value || '').trim()).join('\n');
     }
 
     function formatSequenceValue(value, width) {
@@ -372,7 +384,7 @@
         helper.appendChild(feedback);
     }
 
-    function renderSeqHelper(input, formIds) {
+    function renderSeqHelper(input, formIds, vertical = false) {
         const helper = createOrGetHelper(input);
         if (!helper) return;
 
@@ -380,14 +392,14 @@
         if (!order.ok) {
             renderError(
                 helper,
-                `seq-order-error|${formIds.join(',')}|${order.entries.map(entry => entry.id).join(',')}`,
+                `${vertical ? 'seqv' : 'seq'}-order-error|${formIds.join(',')}|${order.entries.map(entry => entry.id).join(',')}`,
                 order.message
             );
             return;
         }
 
         const signature = [
-            'seq-ready',
+            vertical ? 'seqv-ready' : 'seq-ready',
             formIds.join(','),
             order.entries.map(entry => entry.id).join(',')
         ].join('|');
@@ -400,14 +412,16 @@
 
         const title = document.createElement('div');
         title.style.fontWeight = '600';
-        title.textContent =
-            `SB sequence editor TEST v${VERSION} - ${order.entries.length} signs in visible Sign List order`;
+        title.textContent = vertical
+            ? `SB vertical sequence editor TEST v${VERSION} - ${order.entries.length} signs in visible Sign List order`
+            : `SB sequence editor TEST v${VERSION} - ${order.entries.length} signs in visible Sign List order`;
         helper.appendChild(title);
 
         const intro = document.createElement('div');
         intro.style.marginTop = '4px';
-        intro.textContent =
-            'Generate a starting suggestion, then edit any row that needs a jump, skip, reversal, letter, or other exception.';
+        intro.textContent = vertical
+            ? 'Generate and edit normal logical values. The exact multiline value SignAgent will receive is previewed under each row.'
+            : 'Generate a starting suggestion, then edit any row that needs a jump, skip, reversal, letter, or other exception.';
         helper.appendChild(intro);
 
         const generator = document.createElement('div');
@@ -426,7 +440,7 @@
         const startInput = document.createElement('input');
         startInput.type = 'text';
         startInput.className = 'form-control input-sm sb-seq-start';
-        startInput.placeholder = '507';
+        startInput.placeholder = vertical ? '2201' : '507';
         Object.assign(startInput.style, {
             width: '90px',
             marginTop: '2px'
@@ -471,7 +485,7 @@
                 display: 'grid',
                 gridTemplateColumns: 'minmax(90px, 1fr) minmax(110px, 1fr)',
                 gap: '8px',
-                alignItems: 'center',
+                alignItems: 'start',
                 padding: '5px 7px',
                 borderTop: index === 0 ? '0' : '1px solid rgba(0,0,0,0.06)'
             });
@@ -481,14 +495,46 @@
             label.title = `SignAgent ID ${entry.id}`;
             row.appendChild(label);
 
+            const valueWrap = document.createElement('div');
+
             const valueInput = document.createElement('input');
             valueInput.type = 'text';
             valueInput.className = 'form-control input-sm sb-seq-value';
             valueInput.dataset.signId = entry.id;
             valueInput.dataset.signLabel = entry.label;
             valueInput.setAttribute('aria-label', `${entry.label} value`);
-            row.appendChild(valueInput);
+            valueWrap.appendChild(valueInput);
 
+            if (vertical) {
+                const exactPreview = document.createElement('pre');
+                exactPreview.className = 'sb-seqv-exact';
+                exactPreview.dataset.signId = entry.id;
+                Object.assign(exactPreview.style, {
+                    margin: '4px 0 0',
+                    padding: '5px 7px',
+                    minHeight: '28px',
+                    maxHeight: '100px',
+                    overflow: 'auto',
+                    background: 'rgba(255,255,255,0.75)',
+                    border: '1px solid rgba(0,0,0,0.08)',
+                    borderRadius: '3px',
+                    fontSize: '11px',
+                    lineHeight: '1.25',
+                    whiteSpace: 'pre-wrap'
+                });
+
+                const updateExactPreview = () => {
+                    const logicalValue = valueInput.value.trim();
+                    exactPreview.textContent = logicalValue
+                        ? verticalizeValue(logicalValue)
+                        : '';
+                };
+
+                valueInput.addEventListener('input', updateExactPreview);
+                valueWrap.appendChild(exactPreview);
+            }
+
+            row.appendChild(valueWrap);
             list.appendChild(row);
         });
 
@@ -497,18 +543,25 @@
         const note = document.createElement('div');
         note.style.marginTop = '6px';
         note.style.opacity = '0.8';
-        note.textContent =
-            `Every row is editable. All rows need a value before applying. Only "${fieldLabel}" will be changed.`;
+        note.textContent = vertical
+            ? `Every row is editable. All rows need a value before applying. Only "${fieldLabel}" will be changed, using the exact multiline previews shown above.`
+            : `Every row is editable. All rows need a value before applying. Only "${fieldLabel}" will be changed.`;
         helper.appendChild(note);
 
-        const applyButton = makeActionButton('Apply Mapped Values', 'apply-seq', true);
+        const applyButton = makeActionButton(
+            vertical ? 'Apply Vertical Mapped Values' : 'Apply Mapped Values',
+            vertical ? 'apply-seqv' : 'apply-seq',
+            true
+        );
         applyButton.style.marginTop = '7px';
         helper.appendChild(applyButton);
 
         const feedback = document.createElement('div');
         feedback.className = 'sb-sequence-feedback';
         feedback.style.marginTop = '5px';
-        feedback.textContent = 'Enter a Start value and click Fill Suggestions, then edit any exceptions.';
+        feedback.textContent = vertical
+            ? 'Enter a Start value and click Fill Suggestions, then review both the logical values and exact multiline previews.'
+            : 'Enter a Start value and click Fill Suggestions, then edit any exceptions.';
         helper.appendChild(feedback);
     }
 
@@ -521,8 +574,13 @@
             return;
         }
 
+        if (isSeqvSyntax(input.value)) {
+            renderSeqHelper(input, formIds, true);
+            return;
+        }
+
         if (isSeqSyntax(input.value)) {
-            renderSeqHelper(input, formIds);
+            renderSeqHelper(input, formIds, false);
             return;
         }
 
@@ -579,11 +637,16 @@
         };
     }
 
-    function getSeqApplyContext(button) {
+    function getSeqApplyContext(button, vertical = false) {
         const base = getSourceContext(button);
+        const syntaxMatches = vertical
+            ? isSeqvSyntax(base.input.value)
+            : isSeqSyntax(base.input.value);
 
-        if (!isSeqSyntax(base.input.value)) {
-            throw new Error('The field is no longer in {seq} mode.');
+        if (!syntaxMatches) {
+            throw new Error(
+                `The field is no longer in {${vertical ? 'seqv' : 'seq'}} mode.`
+            );
         }
 
         const mappingInputs = Array.from(base.helper.querySelectorAll('.sb-seq-value'));
@@ -592,6 +655,7 @@
             throw new Error('The mapping editor no longer matches the selected sign count.');
         }
 
+        const logicalValues = [];
         const values = [];
 
         for (let index = 0; index < base.entries.length; index += 1) {
@@ -602,26 +666,29 @@
                 throw new Error('The mapping editor order no longer matches the Sign List order.');
             }
 
-            const value = mappingInput.value.trim();
-            if (!value) {
+            const logicalValue = mappingInput.value.trim();
+            if (!logicalValue) {
                 throw new Error(`${entry.label} does not have a value yet.`);
             }
 
-            values.push(value);
+            logicalValues.push(logicalValue);
+            values.push(vertical ? verticalizeValue(logicalValue) : logicalValue);
         }
 
         return {
             ...base,
-            mode: 'seq',
+            mode: vertical ? 'seqv' : 'seq',
+            logicalValues,
             values
         };
     }
 
     function fillSeqSuggestions(button) {
         const base = getSourceContext(button);
+        const vertical = isSeqvSyntax(base.input.value);
 
-        if (!isSeqSyntax(base.input.value)) {
-            throw new Error('The field is no longer in {seq} mode.');
+        if (!vertical && !isSeqSyntax(base.input.value)) {
+            throw new Error('The field is no longer in {seq} or {seqv} mode.');
         }
 
         const startInput = base.helper.querySelector('.sb-seq-start');
@@ -639,16 +706,28 @@
             if (mappingInputs[index].dataset.signId !== base.entries[index].id) {
                 throw new Error('The mapping editor order no longer matches the Sign List order.');
             }
+
             mappingInputs[index].value = values[index];
+
+            if (vertical) {
+                const exactPreview = base.helper.querySelector(
+                    `.sb-seqv-exact[data-sign-id="${CSS.escape(base.entries[index].id)}"]`
+                );
+                if (exactPreview) {
+                    exactPreview.textContent = verticalizeValue(values[index]);
+                }
+            }
         }
 
         setHelperFeedback(
             base.helper,
-            `Filled ${values.length} suggestions. Edit any exceptions, then review all rows before applying.`,
+            vertical
+                ? `Filled ${values.length} suggestions. Edit any exceptions, then review the exact multiline previews before applying.`
+                : `Filled ${values.length} suggestions. Edit any exceptions, then review all rows before applying.`,
             'normal'
         );
 
-        log('Filled editable sequence suggestions.', {
+        log(vertical ? 'Filled editable vertical sequence suggestions.' : 'Filled editable sequence suggestions.', {
             entries: base.entries,
             values
         });
@@ -693,7 +772,12 @@
             }
 
             if (action === 'apply-seq') {
-                void applyMappings(getSeqApplyContext(button)).catch(handleUnexpectedError);
+                void applyMappings(getSeqApplyContext(button, false)).catch(handleUnexpectedError);
+                return;
+            }
+
+            if (action === 'apply-seqv') {
+                void applyMappings(getSeqApplyContext(button, true)).catch(handleUnexpectedError);
                 return;
             }
         } catch (error) {
@@ -852,6 +936,23 @@
             );
         }
 
+        if (context.mode === 'seqv') {
+            const firstLogical = context.logicalValues[0];
+            const lastLogical = context.logicalValues[context.logicalValues.length - 1];
+
+            return window.confirm(
+                `Apply ${context.entries.length} VERTICAL mapped values?\n\n` +
+                `Field: ${fieldLabel}\n` +
+                `First logical value: ${firstLabel} -> ${firstLogical}\n` +
+                `First exact payload:\n${first}\n\n` +
+                `Last logical value: ${lastLabel} -> ${lastLogical}\n` +
+                `Last exact payload:\n${last}\n\n` +
+                `You are applying the editable mapping shown in the {seqv} editor.\n` +
+                `Order source: SignAgent's visible Sign List.\n` +
+                `Only this field will be changed.`
+            );
+        }
+
         return window.confirm(
             `Apply ${context.entries.length} mapped values?\n\n` +
             `Field: ${fieldLabel}\n` +
@@ -898,11 +999,14 @@
 
             for (let index = 0; index < context.entries.length; index += 1) {
                 const entry = context.entries[index];
+                const logicalValue = context.logicalValues
+                    ? context.logicalValues[index]
+                    : context.values[index];
 
                 setHelperFeedback(
                     context.helper,
                     `Preflighting ${index + 1} of ${context.entries.length}: ` +
-                    `${entry.label} -> ${context.values[index]}`,
+                    `${entry.label} -> ${logicalValue}`,
                     'working'
                 );
 
@@ -922,10 +1026,13 @@
             for (let index = 0; index < prepared.length; index += 1) {
                 const item = prepared[index];
                 const entry = context.entries[index];
+                const logicalValue = context.logicalValues
+                    ? context.logicalValues[index]
+                    : item.nextValue;
 
                 setHelperFeedback(
                     context.helper,
-                    `Saving ${index + 1} of ${prepared.length}: ${entry.label} -> ${item.nextValue}`,
+                    `Saving ${index + 1} of ${prepared.length}: ${entry.label} -> ${logicalValue}`,
                     'working'
                 );
 
@@ -964,6 +1071,9 @@
                 context.entries.map((entry, index) => ({
                     id: entry.id,
                     label: entry.label,
+                    logicalValue: context.logicalValues
+                        ? context.logicalValues[index]
+                        : context.values[index],
                     value: context.values[index]
                 }))
             );
@@ -1032,7 +1142,7 @@
             alert(
                 'Sign Brothers sequence syntax detected.\n\n' +
                 'Use the Sign Brothers Apply button shown under the field instead of the normal SignAgent Save button. ' +
-                'This prevents SignAgent from receiving {start:step} or {seq} directly.'
+                'This prevents SignAgent from receiving {start:step}, {seq}, or {seqv} directly.'
             );
         }, true);
 
@@ -1074,7 +1184,7 @@
         setInterval(scheduleScan, 1500);
         log(
             `SignAgent Sequence Tool v${VERSION} TEST loaded. ` +
-            'Syntax: {start:step} for fast sequences or {seq} for editable mappings.'
+            'Syntax: {start:step} for fast sequences, {seq} for editable mappings, or {seqv} for vertical mappings.'
         );
     }
 
