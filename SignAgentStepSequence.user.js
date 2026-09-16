@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SignAgent Step Sequence (TEST)
 // @namespace    signbrothers-tools
-// @version      0.3.2
+// @version      0.3.3
 // @description  Adds fast {start:step}, editable {seq}, and vertical {seqv} sequencing to SignAgent writable text fields.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
@@ -11,7 +11,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.3.2';
+    const VERSION = '0.3.3';
     const LOG_PREFIX = '[SB Sequence Tool]';
     const HELPER_CLASS = 'sb-sequence-helper';
     const ACTION_BUTTON_CLASS = 'sb-sequence-action';
@@ -66,6 +66,55 @@
         return match ? match[1] : '';
     }
 
+    function getWindowSignIds() {
+        if (typeof window.sign_ids !== 'string') return [];
+
+        return window.sign_ids
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean);
+    }
+
+    function getMapSelectedEntries() {
+        const selected = window.map_js_obj && window.map_js_obj.selected_signs;
+        if (!Array.isArray(selected)) return [];
+
+        return selected
+            .map(item => {
+                if (!Array.isArray(item) || item.length < 2) return null;
+
+                const id = String(item[0] == null ? '' : item[0]).trim();
+                const positionId = String(item[1] == null ? '' : item[1]).trim();
+                if (!id || !positionId) return null;
+
+                return { id, positionId };
+            })
+            .filter(Boolean);
+    }
+
+    function hasUniqueIds(ids) {
+        return new Set(ids).size === ids.length;
+    }
+
+    function sameIdOrder(leftIds, rightIds) {
+        if (leftIds.length !== rightIds.length) return false;
+        return leftIds.every((id, index) => id === rightIds[index]);
+    }
+
+    function getMapMarkerLabel(positionId, signId) {
+        const marker = document.getElementById(`position_${positionId}`);
+        if (!marker) return `Sign ${signId}`;
+
+        const textNode = Array.from(marker.querySelectorAll('text'))
+            .map(node => node.textContent.trim().replace(/\s+/g, ' '))
+            .find(Boolean);
+
+        if (textNode) return textNode;
+
+        const fallback = marker.textContent.trim().replace(/\s+/g, ' ');
+        return fallback || `Sign ${signId}`;
+    }
+
     function resolveVisibleSignListOrder(formIds) {
         const allowed = new Set(formIds);
         const seen = new Set();
@@ -83,20 +132,88 @@
         });
 
         const missing = formIds.filter(id => !seen.has(id));
+        const visibleComplete = entries.length === formIds.length && missing.length === 0;
+        const pageIds = getWindowSignIds();
 
-        if (entries.length !== formIds.length || missing.length) {
+        if (visibleComplete) {
+            if (pageIds.length) {
+                const visibleIds = entries.map(entry => entry.id);
+                const pageStateAgrees =
+                    pageIds.length === formIds.length &&
+                    hasUniqueIds(pageIds) &&
+                    sameIdSet(formIds, pageIds) &&
+                    sameIdOrder(visibleIds, pageIds);
+
+                if (!pageStateAgrees) {
+                    return {
+                        ok: false,
+                        entries,
+                        missing: [],
+                        source: 'disagreement',
+                        sourceLabel: '',
+                        message:
+                            `SignAgent's visible Sign List and page selection state disagree about ` +
+                            `the selected-sign order. No sequence will be applied.`
+                    };
+                }
+            }
+
             return {
-                ok: false,
+                ok: true,
                 entries,
-                missing,
-                message:
-                    `Could not safely determine SignAgent's visible Sign List order ` +
-                    `for all ${formIds.length} selected signs (found ${entries.length}). ` +
-                    `No sequence will be applied.`
+                missing: [],
+                source: 'visible-sign-list',
+                sourceLabel: `SignAgent's visible Sign List`,
+                message: ''
             };
         }
 
-        return { ok: true, entries, missing: [], message: '' };
+        const mapSelected = getMapSelectedEntries();
+        const mapIds = mapSelected.map(entry => entry.id);
+        const pageStateComplete =
+            pageIds.length === formIds.length &&
+            hasUniqueIds(pageIds) &&
+            sameIdSet(formIds, pageIds);
+        const mapStateComplete =
+            mapIds.length === formIds.length &&
+            hasUniqueIds(mapIds) &&
+            sameIdSet(formIds, mapIds);
+        const floorplanSourcesAgree =
+            pageStateComplete &&
+            mapStateComplete &&
+            sameIdOrder(pageIds, mapIds);
+
+        if (floorplanSourcesAgree) {
+            const mapById = new Map(mapSelected.map(entry => [entry.id, entry]));
+            const floorplanEntries = pageIds.map(id => {
+                const mapEntry = mapById.get(id);
+                return {
+                    id,
+                    label: getMapMarkerLabel(mapEntry.positionId, id)
+                };
+            });
+
+            return {
+                ok: true,
+                entries: floorplanEntries,
+                missing: [],
+                source: 'floorplan-selection',
+                sourceLabel: `SignAgent's floorplan selection state`,
+                message: ''
+            };
+        }
+
+        return {
+            ok: false,
+            entries,
+            missing,
+            source: 'none',
+            sourceLabel: '',
+            message:
+                `Could not safely determine a trusted SignAgent order for all ` +
+                `${formIds.length} selected signs (visible Sign List found ${entries.length}, ` +
+                `and floorplan selection state did not fully agree). No sequence will be applied.`
+        };
     }
 
     function parseStepSyntax(value) {
@@ -336,6 +453,7 @@
             'step-ready',
             input.value,
             formIds.join(','),
+            order.source,
             order.entries.map(entry => entry.id).join(','),
             values.join(',')
         ].join('|');
@@ -349,7 +467,7 @@
         const title = document.createElement('div');
         title.style.fontWeight = '600';
         title.textContent =
-            `SB step sequence TEST v${VERSION} for ${order.entries.length} signs using visible Sign List order:`;
+            `SB step sequence TEST v${VERSION} for ${order.entries.length} signs using ${order.sourceLabel}:`;
         helper.appendChild(title);
 
         const preview = document.createElement('pre');
@@ -369,7 +487,7 @@
 
         const note = document.createElement('div');
         note.textContent =
-            `Updates only "${fieldLabel}". It will refuse to run if the selected-list order changes.`;
+            `Updates only "${fieldLabel}". It will refuse to run if the trusted selected-sign order changes.`;
         note.style.marginTop = '5px';
         note.style.opacity = '0.8';
         helper.appendChild(note);
@@ -401,6 +519,7 @@
         const signature = [
             vertical ? 'seqv-ready' : 'seq-ready',
             formIds.join(','),
+            order.source,
             order.entries.map(entry => entry.id).join(',')
         ].join('|');
 
@@ -413,8 +532,8 @@
         const title = document.createElement('div');
         title.style.fontWeight = '600';
         title.textContent = vertical
-            ? `SB vertical sequence editor TEST v${VERSION} - ${order.entries.length} signs in visible Sign List order`
-            : `SB sequence editor TEST v${VERSION} - ${order.entries.length} signs in visible Sign List order`;
+            ? `SB vertical sequence editor TEST v${VERSION} - ${order.entries.length} signs in ${order.sourceLabel}`
+            : `SB sequence editor TEST v${VERSION} - ${order.entries.length} signs in ${order.sourceLabel}`;
         helper.appendChild(title);
 
         const intro = document.createElement('div');
@@ -617,6 +736,8 @@
             form,
             formIds,
             entries: order.entries.map(entry => ({ ...entry })),
+            orderSource: order.source,
+            orderSourceLabel: order.sourceLabel,
             button
         };
     }
@@ -663,7 +784,7 @@
             const mappingInput = mappingInputs[index];
 
             if (mappingInput.dataset.signId !== entry.id) {
-                throw new Error('The mapping editor order no longer matches the Sign List order.');
+                throw new Error('The mapping editor order no longer matches the trusted selected-sign order.');
             }
 
             const logicalValue = mappingInput.value.trim();
@@ -704,7 +825,7 @@
 
         for (let index = 0; index < mappingInputs.length; index += 1) {
             if (mappingInputs[index].dataset.signId !== base.entries[index].id) {
-                throw new Error('The mapping editor order no longer matches the Sign List order.');
+                throw new Error('The mapping editor order no longer matches the trusted selected-sign order.');
             }
 
             mappingInputs[index].value = values[index];
@@ -907,10 +1028,11 @@
         if (
             !freshOrder.ok ||
             !sameIdSet(context.formIds, freshFormIds) ||
-            !sameOrder(context.entries, freshOrder.entries)
+            !sameOrder(context.entries, freshOrder.entries) ||
+            context.orderSource !== freshOrder.source
         ) {
             throw new Error(
-                'The selected signs or their Sign List order changed after the preview/editor was created.'
+                'The selected signs, trusted order, or order source changed after the preview/editor was created.'
             );
         }
     }
@@ -931,7 +1053,7 @@
                 `Sequence: ${first} -> ${last} (${direction} each sign)\n` +
                 `First: ${firstLabel} -> ${first}\n` +
                 `Last: ${lastLabel} -> ${last}\n\n` +
-                `Order source: SignAgent's visible Sign List.\n` +
+                `Order source: ${context.orderSourceLabel}.\n` +
                 `Only this field will be changed.`
             );
         }
@@ -948,7 +1070,7 @@
                 `Last logical value: ${lastLabel} -> ${lastLogical}\n` +
                 `Last exact payload:\n${last}\n\n` +
                 `You are applying the editable mapping shown in the {seqv} editor.\n` +
-                `Order source: SignAgent's visible Sign List.\n` +
+                `Order source: ${context.orderSourceLabel}.\n` +
                 `Only this field will be changed.`
             );
         }
@@ -959,7 +1081,7 @@
             `First: ${firstLabel} -> ${first}\n` +
             `Last: ${lastLabel} -> ${last}\n\n` +
             `You are applying the editable mapping shown in the {seq} editor.\n` +
-            `Order source: SignAgent's visible Sign List.\n` +
+            `Order source: ${context.orderSourceLabel}.\n` +
             `Only this field will be changed.`
         );
     }
@@ -1067,7 +1189,7 @@
             );
 
             log(
-                `Updated ${completed} signs in field ${fieldName} using visible Sign List order:`,
+                `Updated ${completed} signs in field ${fieldName} using ${context.orderSourceLabel}:`,
                 context.entries.map((entry, index) => ({
                     id: entry.id,
                     label: entry.label,
