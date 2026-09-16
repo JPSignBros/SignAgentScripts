@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SignAgent Step Sequence (TEST)
 // @namespace    signbrothers-tools
-// @version      0.3.4
+// @version      0.3.5
 // @description  Adds fast {start:step}, editable {seq}, and vertical {seqv} sequencing to SignAgent writable text fields.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
@@ -11,7 +11,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.3.4';
+    const VERSION = '0.3.5';
     const LOG_PREFIX = '[SB Sequence Tool]';
     const HELPER_CLASS = 'sb-sequence-helper';
     const ACTION_BUTTON_CLASS = 'sb-sequence-action';
@@ -164,36 +164,48 @@
         }
 
         const mapSelected = getMapSelectedEntries();
-        const mapIds = mapSelected.map(entry => entry.id);
-        const pageStateComplete =
-            pageIds.length === formIds.length &&
-            hasUniqueIds(pageIds) &&
-            sameIdSet(formIds, pageIds);
-        const mapStateComplete =
-            mapIds.length === formIds.length &&
-            hasUniqueIds(mapIds) &&
-            sameIdSet(formIds, mapIds);
-        const floorplanSourcesAgree =
-            pageStateComplete &&
-            mapStateComplete &&
-            sameIdOrder(pageIds, mapIds);
+        const mapEntriesForSelection = mapSelected.filter(entry => allowed.has(entry.id));
+        const mapIdsForSelection = mapEntriesForSelection.map(entry => entry.id);
+        const mapOrderComplete =
+            mapIdsForSelection.length === formIds.length &&
+            hasUniqueIds(mapIdsForSelection) &&
+            sameIdSet(formIds, mapIdsForSelection);
 
-        if (floorplanSourcesAgree) {
-            const mapById = new Map(mapSelected.map(entry => [entry.id, entry]));
-            const floorplanEntries = pageIds.map(id => {
-                const mapEntry = mapById.get(id);
-                return {
-                    id,
-                    label: getMapMarkerLabel(mapEntry.positionId, id)
-                };
-            });
+        if (mapOrderComplete) {
+            if (mapSelected.length !== mapEntriesForSelection.length) {
+                log(
+                    'Using current form IDs to filter stale/extra floorplan map entries.',
+                    {
+                        formIds,
+                        mapCatalogCount: mapSelected.length,
+                        matchedCount: mapEntriesForSelection.length
+                    }
+                );
+            }
+
+            const pageStateComplete =
+                pageIds.length === formIds.length &&
+                hasUniqueIds(pageIds) &&
+                sameIdSet(formIds, pageIds);
+
+            if (pageStateComplete && !sameIdOrder(mapIdsForSelection, pageIds)) {
+                log(
+                    'Using floorplan map order; ignoring disagreeing SignAgent selection-order state.',
+                    { formIds, mapIdsForSelection, pageIds }
+                );
+            }
+
+            const floorplanEntries = mapEntriesForSelection.map(entry => ({
+                id: entry.id,
+                label: getMapMarkerLabel(entry.positionId, entry.id)
+            }));
 
             return {
                 ok: true,
                 entries: floorplanEntries,
                 missing: [],
-                source: 'floorplan-selection',
-                sourceLabel: `SignAgent's floorplan selection state`,
+                source: 'floorplan-map-order',
+                sourceLabel: `SignAgent's floorplan map order`,
                 message: ''
             };
         }
@@ -207,7 +219,8 @@
             message:
                 `Could not safely determine a trusted SignAgent order for all ` +
                 `${formIds.length} selected signs (visible Sign List found ${entries.length}, ` +
-                `and floorplan selection state did not fully agree). No sequence will be applied.`
+                `and floorplan map order accounted for ${mapIdsForSelection.length}). ` +
+                `No sequence will be applied.`
         };
     }
 
