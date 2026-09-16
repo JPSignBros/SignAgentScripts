@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SignAgent Step Sequence (TEST)
 // @namespace    signbrothers-tools
-// @version      0.3.3
+// @version      0.3.4
 // @description  Adds fast {start:step}, editable {seq}, and vertical {seqv} sequencing to SignAgent writable text fields.
 // @match        https://app.signagent.com/*
 // @run-at       document-idle
@@ -11,7 +11,7 @@
 (function () {
     'use strict';
 
-    const VERSION = '0.3.3';
+    const VERSION = '0.3.4';
     const LOG_PREFIX = '[SB Sequence Tool]';
     const HELPER_CLASS = 'sb-sequence-helper';
     const ACTION_BUTTON_CLASS = 'sb-sequence-action';
@@ -136,26 +136,21 @@
         const pageIds = getWindowSignIds();
 
         if (visibleComplete) {
-            if (pageIds.length) {
-                const visibleIds = entries.map(entry => entry.id);
-                const pageStateAgrees =
+            const visibleIds = entries.map(entry => entry.id);
+
+            if (
+                pageIds.length &&
+                !(
                     pageIds.length === formIds.length &&
                     hasUniqueIds(pageIds) &&
                     sameIdSet(formIds, pageIds) &&
-                    sameIdOrder(visibleIds, pageIds);
-
-                if (!pageStateAgrees) {
-                    return {
-                        ok: false,
-                        entries,
-                        missing: [],
-                        source: 'disagreement',
-                        sourceLabel: '',
-                        message:
-                            `SignAgent's visible Sign List and page selection state disagree about ` +
-                            `the selected-sign order. No sequence will be applied.`
-                    };
-                }
+                    sameIdOrder(visibleIds, pageIds)
+                )
+            ) {
+                log(
+                    'Visible Sign List fully accounts for the selection; ignoring disagreeing page selection state.',
+                    { formIds, visibleIds, pageIds }
+                );
             }
 
             return {
